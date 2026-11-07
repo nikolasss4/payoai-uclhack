@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local data
+.pgdata/
+data/
+
+# Node
+node_modules/
+.next/
+
+# OS
+.DS_Store
