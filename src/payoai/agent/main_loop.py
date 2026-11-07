@@ -288,6 +288,9 @@ def answer_run(session: Session, run_id: str, value) -> dict:
         except engine.InvalidAnswer as exc:
             s.output = {"refused": str(exc)}
             return {"status": "REFUSED", "reason": str(exc)}
+        except engine.RoutineBusy as exc:
+            s.output = {"busy": str(exc)}
+            return {"status": "BUSY", "reason": str(exc)}
         s.output = {"status": result["status"]}
         return result
 

@@ -32,10 +32,10 @@ def test_any_material_change_changes_the_hash():
 
 
 def test_redaction_removes_secrets_and_full_details():
-    out = redact({"api_key": "abc", "iban": "GB29NWBK60161331926819", "note": "pay GB29NWBK60161331926819 or 0x1234567890123456789012345678901234567890", "n": 1})
+    out = redact({"api_key": "abc", "iban": "GB00EXAM00000000000009", "note": "pay GB00EXAM00000000000009 or 0x1234567890123456789012345678901234567890", "n": 1})
     assert out["api_key"] == "[redacted]"
     assert out["iban"] == "[redacted]"
-    assert "GB29NWBK60161331926819" not in out["note"]
+    assert "GB00EXAM00000000000009" not in out["note"]
     assert "1234567890123456789012345678901234567890" not in out["note"]
 
 

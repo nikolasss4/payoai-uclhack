@@ -6,8 +6,9 @@ Scope: UK domestic full and simplified VAT invoices, and invoices from suppliers
 """
 
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from payoai.domain.money import to_minor
+from payoai.domain.money import format_minor, to_minor
 
 RULESET_VERSION = "uk-invoice-1.1"
 # VAT Notice 700/21 sections 4.1 and 4.5, last updated 18 March 2024, read on 7 November 2026.
@@ -111,6 +112,16 @@ def evaluate(fields: dict) -> list[dict]:
     return out
 
 
+def _percent(rate) -> Decimal | None:
+    if rate in (None, ""):
+        return None
+    try:
+        percent = Decimal(str(rate).strip().rstrip("%"))
+    except InvalidOperation:
+        return None
+    return percent if percent.is_finite() else None
+
+
 def _arithmetic(fields: dict, asset: str) -> list[dict]:
     if asset not in ("GBP", "USD", "EUR"):
         return []
@@ -123,17 +134,14 @@ def _arithmetic(fields: dict, asset: str) -> list[dict]:
     if lines and subtotal is not None:
         nets = [_money(line, "net", asset) for line in lines]
         if all(n is not None for n in nets) and abs(sum(nets) - subtotal) > tolerance:
-            out.append(result("UK-ARITH-LINES", "NEEDS_REVIEW", f"Line items add up to {sum(nets)} minor units, but the subtotal says {subtotal}.", lines_minor=sum(nets), subtotal_minor=subtotal))
+            out.append(result("UK-ARITH-LINES", "NEEDS_REVIEW", f"Line items add up to {format_minor(sum(nets), asset)}, but the subtotal says {format_minor(subtotal, asset)}.", lines_minor=sum(nets), subtotal_minor=subtotal))
     if subtotal is not None and total is not None and abs(subtotal + vat_total - total) > tolerance:
-        out.append(result("UK-ARITH-TOTAL", "NEEDS_REVIEW", f"Subtotal plus VAT comes to {subtotal + vat_total} minor units, but the total says {total}. A person must choose which is right.", computed_minor=subtotal + vat_total, stated_minor=total))
+        out.append(result("UK-ARITH-TOTAL", "NEEDS_REVIEW", f"Subtotal plus VAT comes to {format_minor(subtotal + vat_total, asset)}, but the total says {format_minor(total, asset)}. A person must choose which is right.", computed_minor=subtotal + vat_total, stated_minor=total))
     for index, line in enumerate(lines):
         net, vat, rate = _money(line, "net", asset), _money(line, "vat", asset), line.get("vat_rate")
-        try:
-            percent = float(str(rate).strip().rstrip("%")) if rate not in (None, "") else None
-        except ValueError:
-            percent = None
+        percent = _percent(rate)
         if net is not None and vat is not None and percent is not None:
-            expected = round(net * percent / 100)
+            expected = int((Decimal(net) * percent / 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
             if abs(expected - vat) > ROUNDING_TOLERANCE_PER_LINE_MINOR:
-                out.append(result("UK-ARITH-VAT-LINE", "NEEDS_REVIEW", f"Line {index + 1}'s VAT should be {expected} minor units at {percent}%, but it says {vat}.", line=index))
+                out.append(result("UK-ARITH-VAT-LINE", "NEEDS_REVIEW", f"Line {index + 1}'s VAT should be {format_minor(expected, asset)} at {percent}%, but it says {format_minor(vat, asset)}.", line=index))
     return out

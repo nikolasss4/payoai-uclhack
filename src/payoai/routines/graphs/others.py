@@ -46,8 +46,15 @@ def replace_bill() -> StateGraph:
     g.add_node("record_corrections", extra.record_corrections)
     g.add_edge(START, "prepare_replacement")
     g.add_conditional_edges("prepare_replacement", _after("load_document"))
-    g.add_conditional_edges("load_document", _after("extract_fields"))
-    g.add_conditional_edges("extract_fields", _after("apply_corrections"))
+    g.add_node("undo_replacement", extra.undo_replacement)
+    g.add_edge("undo_replacement", END)
+
+    def or_undo(next_node: str):
+        return lambda state: "undo_replacement" if state.get("stop") else next_node
+
+    # The old bill was already retired. If the new one can't be read, the old one must come back.
+    g.add_conditional_edges("load_document", or_undo("extract_fields"))
+    g.add_conditional_edges("extract_fields", or_undo("apply_corrections"))
     g.add_edge("apply_corrections", "match_counterparty")
     g.add_conditional_edges("match_counterparty", _after("register_obligation", "ask_counterparty"))
     g.add_edge("ask_counterparty", "match_counterparty")
@@ -98,12 +105,10 @@ def prepare_occurrence() -> StateGraph:
     g.add_node("claim_occurrence", recurring.claim_occurrence)
     g.add_node("load_mandate", recurring.load_mandate)
     g.add_node("register_obligation", checks.register_obligation)
-    g.add_node("check_mandate", recurring.check_mandate)
     g.add_edge(START, "claim_occurrence")
     g.add_conditional_edges("claim_occurrence", _after("load_mandate"))
     g.add_conditional_edges("load_mandate", _after("register_obligation"))
-    g.add_edge("register_obligation", "check_mandate")
-    _add_checks(g, "check_mandate", include_compliance=False)
+    _add_checks(g, "register_obligation", include_compliance=False)
     _add_finish(g, prepare=True)
     return g
 

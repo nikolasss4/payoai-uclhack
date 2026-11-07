@@ -51,6 +51,8 @@ def record_expense(conn: psycopg.Connection, intent: dict, attempt: dict) -> str
             "INSERT INTO exceptions (id, team_id, expense_id, kind, details) VALUES (%s, %s, %s, 'MISSING_DOCUMENT', %s) ON CONFLICT DO NOTHING",
             (new_id("exc"), team, expense_id, Jsonb({"reason": "No invoice or receipt is attached to this payment."})),
         )
+        # Chase Missing Document drafts with a model, so it runs in agent-worker. This process has no LLM.
+        enqueue(conn, "run_routine", team, {"routine": "chase_missing_document", "inputs": {"expense_id": expense_id}, "actor": None}, dedupe_key=f"chase:{expense_id}")
     return expense_id
 
 
@@ -62,9 +64,11 @@ def _minor(value, asset) -> int | None:
 
 
 def _journal(gross, net, tax, asset) -> list[dict]:
-    expense_amount = net if net is not None else gross
+    # The bank line is what actually left the account, so the lines always balance to it, even when
+    # an invoice's own figures don't add up.
+    expense_amount = gross - (tax or 0)
     lines = [{"account": "Expenses (uncategorised)", "debit_minor": expense_amount, "credit_minor": 0, "asset": asset}]
     if tax:
         lines.append({"account": "VAT input", "debit_minor": tax, "credit_minor": 0, "asset": asset})
-    lines.append({"account": "Bank or wallet", "debit_minor": 0, "credit_minor": expense_amount + (tax or 0), "asset": asset})
+    lines.append({"account": "Bank or wallet", "debit_minor": 0, "credit_minor": gross, "asset": asset})
     return lines
