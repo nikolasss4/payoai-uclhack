@@ -53,12 +53,13 @@ def classify(fields: dict) -> str:
     country = (fields.get("supplier_country") or "GB").upper()
     if "reverse charge" in text or country not in ("GB", "UK", "UNITED KINGDOM"):
         return "UNSUPPORTED"
-    if (fields.get("currency") or "GBP").upper() != "GBP":
-        return "UNSUPPORTED"
     vat_total = _money(fields, "vat_total", "GBP")
     line_vat = any(_money(line, "vat", "GBP") for line in fields.get("line_items") or [])
     charged = bool(vat_total) or line_vat
     has_number = bool(fields.get("vat_number"))
+    # A VAT invoice must state VAT in sterling, so another currency only matters if VAT is in play.
+    if (fields.get("currency") or "GBP").upper() != "GBP" and (charged or has_number):
+        return "UNSUPPORTED"
     if charged:
         return "FULL_VAT"
     if not has_number:

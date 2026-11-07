@@ -4,7 +4,8 @@ import os
 
 import pytest
 
-os.environ["PAYOAI_SCHEMA"] = "payoai_test"
+# Parallel runs each set their own PAYOAI_TEST_SCHEMA, so they never drop each other's tables.
+os.environ["PAYOAI_SCHEMA"] = os.environ.get("PAYOAI_TEST_SCHEMA", "payoai_test")
 
 from payoai.settings import load_env  # noqa: E402
 

@@ -1,0 +1,19 @@
+{
+  "generated_by": "evals/generators/cases.py",
+  "synthetic": true,
+  "note": "All data is invented. Expected results come from scenario definitions, not from running PayoAI.",
+  "files": {
+    "dev.jsonl": {
+      "cases": 90,
+      "sha256": "a4ea6fb78071e7c26cf66ff85c26e6cc15ad23b97adbf71279ca9f396377bbf7"
+    },
+    "validation.jsonl": {
+      "cases": 20,
+      "sha256": "b3254579c733a5424d9b3e85d3c94a99cdb5233b70328c9f1c62d58690100958"
+    },
+    "heldout.jsonl": {
+      "cases": 40,
+      "sha256": "2ba6dd463a721fdc93e17a9439f7e9079bc7b3c4ec2aabf4689d3b7f649850fe"
+    }
+  }
+}
