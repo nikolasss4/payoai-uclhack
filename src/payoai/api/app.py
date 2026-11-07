@@ -604,17 +604,32 @@ def dev_start(body: DevRun, user_id: str = Depends(developer)):
 # Frontend
 
 
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
 WEB = ROOT / "web"
 
 
 @app.get("/")
 def index():
-    return FileResponse(WEB / "index.html")
+    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/health")
 def health():
     return {"ok": True, "data": "synthetic", "real_money": False}
+
+
+class Frontend(StaticFiles):
+    """There's no build step, so browsers check for a new copy of each file every time."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+# Last, so that every route above takes priority. web/ holds only public files.
+app.mount("/", Frontend(directory=WEB), name="web")
 
 
 __all__ = ["Query", "Path"]
