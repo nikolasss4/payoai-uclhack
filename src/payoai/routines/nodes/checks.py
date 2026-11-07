@@ -74,7 +74,7 @@ def register_obligation(state: RunState, ctx) -> dict:
                 obligation_id, state["team_id"], state["counterparty_id"],
                 "INVOICE" if is_invoice else inputs.get("source_type", "REQUEST"),
                 state.get("document_id"), state.get("extraction_id"),
-                fields.get("notes") if is_invoice else inputs.get("purpose"),
+                fields.get("notes") if is_invoice else ((state.get("answers") or {}).get("purpose") or inputs.get("purpose")),
                 amount, asset, _date(fields.get("due_date") or inputs.get("due_date")), reference, fields.get("period") or inputs.get("period"),
                 "BLOCKED" if live else "REGISTERED", inputs.get("mandate_id"), state.get("actor"),
             ),
@@ -142,8 +142,6 @@ def check_duplicates(state: RunState, ctx) -> dict:
             results.append(record_check(state, "Check Duplicates", "NEAR_DUPLICATE", "NEEDS_REVIEW", f"A similar payment of the same amount to this counterparty exists on {near['id']}. Repeat payments are often legitimate, so a person should check.", {"earlier": near["id"]}))
         else:
             results.append(record_check(state, "Check Duplicates", "NO_DUPLICATE", "PASS", "No matching invoice, file or recent similar payment."))
-    if me["status"] == "BLOCKED" and not exact:
-        results.append(record_check(state, "Check Duplicates", "DUPLICATE_INVOICE", "BLOCK", "This invoice number was already live when the bill was registered."))
     return {"checks": results}
 
 

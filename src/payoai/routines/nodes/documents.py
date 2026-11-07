@@ -117,6 +117,18 @@ def load_document(state: RunState, ctx) -> dict:
     return {"document_id": document_id}
 
 
+@node("Load Document")
+def load_document_for_replacement(state: RunState, ctx) -> dict:
+    """Replace Bill's version: the document comes from the bill being replaced."""
+    if not state.get("document_id"):
+        return {"stop": "This bill has no document. Use Pay Someone with the right details instead."}
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT * FROM documents WHERE id = %s AND team_id = %s", (state["document_id"], state["team_id"]))
+    if row is None or hashlib.sha256(Path(row["storage_path"]).read_bytes()).hexdigest() != row["sha256"]:
+        return {"stop": "The stored document no longer matches its hash, so it can't be used."}
+    return {}
+
+
 @node("Extract Fields", trust_label="UNTRUSTED")
 def extract_fields(state: RunState, ctx) -> dict:
     with tx() as conn:

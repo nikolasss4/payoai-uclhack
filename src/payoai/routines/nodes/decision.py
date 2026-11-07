@@ -131,6 +131,25 @@ def explain(state: RunState, ctx) -> dict:
     return {"explanation": explanation}
 
 
+@node("Explain")
+def explain_without_decision_record(state: RunState, ctx) -> dict:
+    """For a compliance report, which makes no payment decision to attach the explanation to."""
+    fallback = plain_list(state)
+    try:
+        explanation = llm.call(
+            "explain",
+            [llm.text_part(
+                "Explain this invoice check in two or three plain sentences. Use only these facts. Say what's missing and why it matters. "
+                f"It's prepared for accountant review, not certified compliant. Facts: {_jsonable(state.get('reasons'))}"
+            )],
+            ctx,
+            schema=EXPLAIN_SCHEMA,
+        ).data["explanation"]
+    except llm.LLMFailure:
+        explanation = fallback
+    return {"explanation": explanation, "result": {**(state.get("result") or {}), "explanation": explanation}}
+
+
 @node("Prepare Payment")
 def prepare_payment(state: RunState, ctx) -> dict:
     """Builds the exact payment and its hash. Blocked bills and unanswered questions get nothing."""
