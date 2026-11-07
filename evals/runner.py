@@ -410,6 +410,35 @@ def model_label(suite: str, system: str) -> str:
     return "real" if system == "llm_only" or suite in ("full_agent", "main_loop") else "faked"
 
 
+def spread(cases: list[dict], limit: int) -> list[dict]:
+    """Every category gets a share in proportion to its size, and at least one case, and layouts rotate
+    within it. Layouts repeat in a fixed order, so plain every-Nth sampling can land on one layout only.
+    """
+    groups: dict[str, list[dict]] = {}
+    for case in cases:
+        groups.setdefault(case["category"], []).append(case)
+    counts = {k: max(1, len(g) * limit // len(cases)) for k, g in groups.items()} if limit >= len(groups) else {}
+    for key in sorted(groups, key=lambda k: -(len(groups[k]) * limit / len(cases) % 1)):
+        if sum(counts.values()) >= limit:
+            break
+        counts[key] = counts.get(key, 0) + 1
+    while sum(counts.values()) > limit:
+        largest = max(counts, key=counts.get)
+        counts[largest] -= 1
+    chosen: list[dict] = []
+    for key, group in groups.items():
+        rank: dict[str, int] = {}
+        order = []
+        for case in group:
+            layout = case.get("layout") or "none"
+            order.append((rank.get(layout, 0), layout, case))
+            rank[layout] = rank.get(layout, 0) + 1
+        ordered = [c for _, _, c in sorted(order, key=lambda t: (t[0], t[1]))]
+        count = counts.get(key, 0)
+        chosen += ordered[:count]
+    return sorted(chosen, key=cases.index)
+
+
 def run(suite: str, split: str, system: str = "payoai", limit: int | None = None, workers: int = 4, judge_sample: int = 0, eval_run_id: str | None = None, case_id: str | None = None) -> dict:
     if suite == "main_loop":
         if system != "payoai":
@@ -422,9 +451,7 @@ def run(suite: str, split: str, system: str = "payoai", limit: int | None = None
     if case_id:
         cases = [c for c in cases if c["id"] == case_id]
     if limit:
-        # An even spread across scenarios, so a short run still covers the categories.
-        step_size = max(1, len(cases) // limit)
-        cases = cases[::step_size][:limit]
+        cases = spread(cases, limit)
     eval_run_id = eval_run_id or new_id("evr")
     with tx() as conn:
         conn.execute(
