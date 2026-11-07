@@ -12,6 +12,8 @@ Related documents:
 
 Where this plan and those documents overlap, those documents hold the detail.
 
+**Status:** this began as the plan and has been updated to match the code at commit `d94d88b`. Section 15 lists every place the build differs from the original plan. Section 13 is kept as the original schedule, and isn't a log of what happened.
+
 ## 1. Product
 
 **User:** a UK small business owner with no finance team.
@@ -20,7 +22,7 @@ Where this plan and those documents overlap, those documents hold the detail.
 
 **Failure that hurts them:** paying a fraudster's changed bank details, paying twice, or missing a payment because cash ran short.
 
-**Scope:** all 18 Routines in `docs/routines.md`, Airwallex, Wise and Circle rails, four evaluation suites and the Developer Console. If time runs short, follow the order in section 13.
+**Scope:** the target was all 18 Routines in `docs/routines.md`, Airwallex, Wise and Circle rails, four evaluation suites and the Developer Console. What exists is 18 Routines at the statuses listed in `docs/routines.md`, the simulator as the only rail, three evaluation suites, and the Developer Console as API routes.
 
 **Hard limits:** synthetic data only, clearly labelled. No real money, real records, real account details or logins. A human approves anything that moves money.
 
@@ -32,14 +34,15 @@ Where this plan and those documents overlap, those documents hold the detail.
 | API | FastAPI, with server-sent events for live updates | |
 | Database | Postgres | Also holds the job queue and LangGraph checkpoints. See section 3. |
 | Database access | psycopg 3 with explicit SQL, plus numbered SQL migrations | Conditional updates stay visible and reviewable |
-| Routines with LLM steps | LangGraph with the Postgres checkpointer | ADR 0001 |
+| Main Loop | A plain Python loop | Gemini's API stores the conversation. See the note in ADR 0001. |
+| Routines | LangGraph with the Postgres checkpointer | ADR 0001 |
 | Money path | Plain Python and a job queue | ADR 0001 |
 | Models | `google-genai` 2.3.0 or later, Interactions API | ADR 0002 |
-| Typed data | Pydantic v2 | Validates every LLM output and API body |
-| Crypto | `web3.py`, Base Sepolia if Circle's testnet USDC supports it | Never hand-written cryptography |
+| Typed data | Pydantic v2 for API bodies and Routine inputs | LLM output is requested against a JSON schema and parsed as JSON. It isn't re-validated with Pydantic. |
+| Crypto | Simulated only | `web3.py` isn't a dependency, and nothing is signed or broadcast |
 | PDF text | `pypdf` | Lets code confirm that extraction quotes appear in the document |
-| Scripted checkout | Playwright | |
-| Frontend | Next.js mobile-first web app | Screens follow the UI design still to come |
+| Scripted checkout | Fixed HTTP calls with `httpx` against the test shop | Playwright isn't used, because the test shop is the only supported merchant |
+| Frontend | Plain static HTML and JavaScript in `web/`, served by the API | Next.js isn't used, pending the user's design |
 | Tests | `pytest` | |
 
 ## 3. Infrastructure
@@ -48,29 +51,31 @@ Where this plan and those documents overlap, those documents hold the detail.
 
 Docker, Postgres and `gcloud` aren't installed on this machine, and the guide says not to spend the weekend on deployment. The demo runs on the laptop, with a screen recording as the backup.
 
-**Postgres:** Supabase, through its IPv4 pooler, in a private `payoai` schema that its web API does not expose. It holds synthetic data only.
+**Postgres:** Supabase, through its IPv4 pooler, in a private `payoai` schema that its web API does not expose. Connections turn off prepared statements for the pooler. It holds synthetic data only. Tests use a separate schema, which they drop and recreate.
+
+**Migrations:** numbered SQL files in `migrations/`, applied in order, once each, by `payoai.db.migrate`.
 
 **Hosting:** Cloud Run and Cloud SQL are optional and only considered after the final results are in.
 
 ### Processes
 
 ```text
-Next.js web app
-      |  HTTPS + server-sent events
+Static web page (web/)
+      |  HTTP + server-sent events
       v
-api ---------------- chats, Turns, approvals, webhooks, Developer Console
+api ---------------- chats, Turns, approvals, webhooks, Developer Console routes
       |
       |  Postgres: records, jobs, checkpoints, traces
       |
-      +-- agent-worker -- Main Loop and LLM Routines
+      +-- agent-worker -- Main Loop, Routines, category suggestions, Auto Mode, eval runs
       |                   Holds: Gemini key. No payment secrets.
       |
-      +-- money-worker -- Execute Payment and Reconcile Payment
-      |                   Holds: provider keys and testnet signing key. No model access.
+      +-- money-worker -- Execute Payment, Reconcile Payment and Purchase Checkout's final steps
+      |                   Holds: provider keys when real rails exist. Calls no LLM.
       |
-      +-- scheduler ----- Occurrences, Cash Analysis, reconciliation polling
+      +-- scheduler ----- Occurrences, daily Cash Analysis, missing-document reminders, stale job recovery
       |
-      +-- provider adapters: Simulator, Airwallex, Wise, Circle/testnet
+      +-- provider adapter: Simulator only. Airwallex, Wise and Circle aren't built.
 
 merchant-site -------- test shop for Purchase Checkout
 ```
@@ -78,11 +83,11 @@ merchant-site -------- test shop for Purchase Checkout
 | Process | Holds | Can't do |
 |---|---|---|
 | `api` | Database access | Call providers to send money, or read provider or signing keys |
-| `agent-worker` | Gemini key | Read provider or signing keys, or start Execute Payment |
-| `money-worker` | Provider keys and signing key | Call any LLM |
+| `agent-worker` | Gemini key | Read provider or signing keys. It has no handler for Execute Payment. |
+| `money-worker` | Provider keys, once they exist | Its job handlers call no LLM, and it doesn't load the Gemini key |
 | `scheduler` | Database access | Do the work itself. It only creates jobs. |
 
-Each process loads its own env file, so a compromised agent process has no payment secret to reach.
+Each process loads its own env file, so a compromised agent process has no payment secret to reach. All processes share one `DATABASE_URL`, so this separation covers secrets, not database rights. A compromised process could write to any table. Real use would need a separate database role per process.
 
 ### Job queue
 
@@ -90,7 +95,7 @@ One Postgres table. Workers claim jobs using `SELECT ... FOR UPDATE SKIP LOCKED`
 
 A job created by an approval is saved in the same transaction as the approval. `dedupe_key` is unique, so a repeat webhook or timer can't create a second job.
 
-Job kinds: `run_routine`, `resume_routine`, `execute_payment`, `reconcile_payment`, `fire_occurrence`, `cash_analysis`.
+Job kinds: `run_turn`, `run_routine`, `fire_occurrence`, `cash_analysis`, `suggest_category`, `attach_evidence`, `learn_memory` and `run_eval` for `agent-worker`, and `execute_payment`, `reconcile_payment` and `execute_checkout` for `money-worker`. Answering a Waiting Run resumes the Routine directly, so there is no `resume_routine` job.
 
 ## 4. Repository layout
 
@@ -101,39 +106,45 @@ PayoAI/
   pyproject.toml
   .env.example                 names only, no values
   docs/
-  migrations/
+  deck/                        judging deck, pitch script and data notes
+  migrations/                  numbered SQL files
+  scripts/                     dev.sh, smoke.py
   src/payoai/
     api/                       routes, sessions, server-sent events, webhooks
-    domain/                    pure money, hash and state-machine code, no I/O
-    db/                        team-scoped queries
+    domain/                    pure money and hash code, and combining check results, no I/O
+    db/                        connection pool and migrations
     trace/                     Trace Steps and Audit Events
     queue/                     claiming and creating jobs
     agent/
       main_loop.py
       read_tools.py
       chips.py                 chip rendering and the reply check
-      llm.py                   the only module that calls Gemini
+      llm.py                   LLM calls for Nodes (Main Loop, Purchase Research and the LLM-only baseline use its client directly)
       config.py                model and thinking level per step
-      prompts/                 versioned prompt files
     routines/
-      nodes/                   shared Nodes, including fiat and crypto versions
-      graphs/                  one LangGraph file per Routine
+      nodes/                   shared Nodes, including fiat and crypto checks
+      graphs/                  payment.py and others.py hold every LangGraph definition
+      engine.py                starts and resumes runs
+      inputs.py                what the Main Loop may pass to each Routine
       registry.py              Routine config, including Start Confirmation
-    money/                     Execute Payment and Reconcile Payment, no LangGraph
-    providers/                 base interface, simulator, airwallex, wise, circle
+    money/                     Execute Payment, Reconcile Payment, approval and Record Expense, no LangGraph
+    providers/                 base interface and simulator
     compliance/rules/          versioned UK rules
     memory/
     workers/                   agent_worker, money_worker, scheduler
   merchant_site/
-  web/                         Next.js
+  web/                         static HTML and JavaScript
   evals/
-    cases/{dev,validation,heldout}/
+    cases/                     dev, validation and heldout .jsonl files, and MANIFEST.json
     generators/
-    judges/
     baselines/
+    judges.py
+    layouts.py
     runner.py
   tests/
 ```
+
+Prompts are written inline in the code that uses them, not in versioned files. Only the Main Loop records a prompt version.
 
 ## 5. Data model
 
@@ -142,8 +153,8 @@ Every business table has `team_id`. Money is stored as an integer in the asset's
 | Group | Tables |
 |---|---|
 | **Access** | `users`, `teams`, `memberships` (Viewer, Operator, Approver), `platform_roles` (Developer) |
-| **Conversation** | `chats`, `turns`, `task_list_items` |
-| **Routines** | `routine_runs`, `run_questions`, `start_confirmations`, `langgraph_*` (library-managed) |
+| **Conversation** | `chats`, `turns`, `task_list_items`, `chat_events` |
+| **Routines** | `routine_runs`, `run_questions`, `start_confirmations`, and LangGraph's own checkpoint tables |
 | **Trace** | `trace_steps`, `audit_events` |
 | **Contacts** | `counterparties`, `payment_destinations`, `destination_verifications`, `contact_channels` |
 | **Bills** | `documents`, `extractions`, `field_corrections`, `obligations` |
@@ -154,13 +165,17 @@ Every business table has `team_id`. Money is stored as an integer in the asset's
 | **Accounting** | `expense_versions`, `journal_proposals`, `exceptions` |
 | **Purchases** | `research_reports`, `research_sources`, `purchase_summaries` |
 | **Memory** | `memories` |
-| **Other** | `jobs`, `notifications`, `eval_cases`, `eval_runs`, `eval_results` |
+| **Simulator** | `sim_transfers` (its ledger), `sim_balances`, `sim_faults` |
+| **Other** | `jobs`, `notifications`, `eval_runs`, `eval_results`, `schema_migrations` |
+
+The `templates` table exists, but no code uses it yet.
 
 ### Rules the database enforces
 
 | Rule | How |
 |---|---|
 | One active attempt per payment | Partial unique index on `payment_attempts(intent_id)` while the attempt is active |
+| One live payment per bill, and one open approval per payment | Partial unique indexes on `payment_intents(obligation_id)` and `approvals(intent_id)` |
 | One Occurrence per Mandate and period | Unique `occurrences(mandate_id, period)` |
 | One idempotency key per team, provider and operation | Unique index on `payment_attempts` |
 | One step running per Chat | Partial unique index on `routine_runs(chat_id)` while `running` |
@@ -168,34 +183,34 @@ Every business table has `team_id`. Money is stored as an integer in the asset's
 | Unique invoice per supplier | Unique index excluding Superseded Bills |
 | Append-only audit and expense history | Database trigger rejects `UPDATE` and `DELETE` |
 | One exception per expense | Unique index on open exceptions |
-| An Approval bound to one payment hash | `approvals(intent_id, payload_hash)`, with no way to change the hash |
+| An Approval bound to one payment hash | A trigger rejects any change to an approval's hash or payment |
 
 ### Approval
 
-An approval is one statement inside one transaction. See `docs/routines.md`, "Approval".
+An approval is one statement inside one transaction, in `src/payoai/money/approval.py`. See `docs/routines.md`, "Approval".
 
 ```sql
 UPDATE approvals
-SET status = 'APPROVED', decided_by = :user_id, decided_at = now()
+SET status = :decision, decided_by = :user_id, decided_at = now(), reason = :reason
 WHERE id = :approval_id
   AND team_id = :team_id
   AND status = 'PENDING'
   AND payload_hash = :hash_shown_on_screen
-  AND expires_at > now()
+  AND (expires_at > now() OR :decision = 'REJECTED')
   AND EXISTS (approver role still held by :user_id)
-  AND NOT EXISTS (Pause All Payments is on for :team_id)
-RETURNING id;
+  AND (:decision = 'REJECTED' OR NOT EXISTS (Pause All Payments is on for :team_id))
+RETURNING id, intent_id;
 ```
 
-If a row comes back, the same transaction queues `execute_payment`. If not, the API reads the record and says why.
+A rejection is still allowed after expiry and during a pause. If an approval's row comes back, the same transaction queues `execute_payment`. If not, the API reads the record and says why.
 
 ## 6. Agent
 
 ### Main Loop
 
-`agent/main_loop.py` is a LangGraph agent calling Argon through `agent/llm.py`. Its conversation is stored by the API with `previous_interaction_id`, and every input and output is saved as a Trace Step.
+`agent/main_loop.py` is a plain loop of up to 10 steps, calling Argon with the client from `agent/llm.py`. It isn't a LangGraph graph, because Gemini's API stores the conversation with `previous_interaction_id`, so there is no conversation state to checkpoint. Every input and output is saved as a Trace Step.
 
-Code adds this user's Waiting Runs, task list and active Memory at the end of the latest input, labelled as data. Stable instructions stay at the start, so implicit caching works.
+Code adds this chat's Waiting Runs, task list, Start Confirmation cards, recent runs and active Memory at the end of the latest input, labelled as data. Stable instructions stay at the start, so implicit caching works.
 
 | Tool | Effect |
 |---|---|
@@ -204,7 +219,7 @@ Code adds this user's Waiting Runs, task list and active Memory at the end of th
 | `answer_run(run_id, value)` | Answers a Waiting Run's question. The Routine rejects anything outside the allowed answers. |
 | `update_task_list(items)` | Saves the plan for multi-part requests. It gives no authority. |
 
-The Main Loop has no tool for approval, verification, execution or changing check results. Team and role come from the session, never from tool inputs. Bank and wallet details aren't accepted as inputs at all.
+The Main Loop has no tool for approval, verification, execution or changing check results. Team and role come from the session, never from tool inputs. Bank and wallet details are refused in every Routine's inputs except Add Counterparty, which saves them as `UNVERIFIED`, so they can't be paid.
 
 ### Reply handling
 
@@ -216,10 +231,11 @@ The Main Loop has no tool for approval, verification, execution or changing chec
 ### Routines
 
 - **Nodes:** each Node is wrapped so a Trace Step is saved when it starts and updated when it ends. If that save fails, the Node doesn't run.
-- **Pauses:** pauses live in their own small Nodes, because resuming restarts a paused Node from its beginning.
+- **Pauses:** pauses for questions live in their own small Node, because resuming restarts a paused Node from its beginning.
 - **Source of truth:** `routine_runs.status` is authoritative, and LangGraph checkpoints only track progress.
-- **Handing over money:** Routines stop at Await Approval. They never call a provider.
-- **LLM Nodes:** Extract Fields, Investigate and Explain return validated typed output. They have a timeout and a capped retry count. Anything other than a completed, valid result is a failed step.
+- **Handing over money:** a Routine's graph ends after Prepare Payment, and the run is marked `AWAITING_APPROVAL`. Routines never submit a payment to a provider.
+- **LLM Nodes:** Extract Fields, Investigate and Explain ask for JSON matching a schema. They have a timeout and one retry. Anything other than a completed result with valid JSON is a failed step.
+- **Investigate:** code gathers the related records and the model gets them in one call, with no tool loop. A finding that cites no known record is dropped.
 - **Decisions:** check and decision Nodes never receive Memory or LLM output as authority.
 
 ### Models
@@ -234,20 +250,20 @@ Documents, web pages and provider text are data. They're labelled when shown to 
 
 ### Provider interface
 
-Each adapter implements listing accounts, balances, destination validation, quotes, submission, status lookup, transaction lookup and webhook verification. It also declares capability flags, because providers differ.
+The simulator implements balances, submission, status lookup and webhook verification, and declares capability flags. `get_provider` returns the simulator for every provider name.
 
-| Adapter | Purpose |
-|---|---|
-| `simulator` | Default for development and the benchmark. Injects timeouts, duplicate and reordered webhooks, pending states, reverted transactions and stale balances. |
-| `airwallex` | Real sandbox |
-| `wise` | Real sandbox |
-| `circle` | Testnet USDC, signed locally by `money-worker` using an audited library if Stage 1 confirms it |
+| Adapter | Purpose | Status |
+|---|---|---|
+| `simulator` | Default for development and the benchmark. Injects timeouts, server errors, rejections, pending states, failures after pending, wrong settled amounts, an unreachable status and stale balances. | Built |
+| `airwallex` | Real sandbox | Not built |
+| `wise` | Real sandbox | Not built |
+| `circle` | Testnet USDC, signed locally by `money-worker` | Not built |
 
-Results are always labelled as simulated, sandbox-observed or testnet-observed. If a real rail isn't accessible, the plan and the deck say so plainly.
+Every attempt carries an evidence label, which is always `SIMULATED` today. The simulator charges no fee. The fee on a payment is a fixed maximum in code (`fee_cap`), which only reserves cash.
 
 ### Payment hash
 
-`domain/` builds the canonical payment (team, source, destination, rail, amount, asset, chain and token if crypto, maximum fee, obligation and reference) and hashes it with SHA-256. Execute Payment recomputes the hash before sending.
+`domain/` builds the canonical payment (team, source, destination and its details, rail, provider, amount, asset, chain and token if crypto, maximum fee, obligation and reference) and hashes it with SHA-256. Execute Payment recomputes the hash before sending.
 
 Execution and reconciliation rules are in `docs/routines.md`.
 
@@ -264,13 +280,14 @@ Execution and reconciliation rules are in `docs/routines.md`.
 | **Payments** | List, view with its full trace |
 | **Cash** | Balances, analyses, alerts |
 | **Controls** | Pause and resume all payments |
-| **Recurring** | Mandates (activate, pause, revoke), templates |
+| **Recurring** | Mandates (activate, pause, revoke). There are no template routes. |
 | **Accounting** | Expenses, versions, manual corrections, exceptions |
-| **Memory** | List, edit, delete, Auto Mode setting |
-| **Webhooks** | One signed endpoint per provider |
-| **Developer** | Browse traces, replay, re-run a case or suite, compare results. Separate role, synthetic eval teams only. |
+| **Memory** | List, delete, Auto Mode setting. There is no edit route. |
+| **Purchases** | List, approve |
+| **Webhooks** | One signed route, keyed by provider name |
+| **Developer** | List runs, read a run, read an eval team's trace, start a run. Separate role. |
 
-Every route checks team membership and role on the server. Screens only reflect those checks.
+Routes that touch team data check membership and role on the server. Screens only reflect those checks. Demo sign-in takes a seeded email with no password, so it isn't real authentication.
 
 ## 9. Security
 
@@ -286,13 +303,13 @@ See `docs/evaluation.md`.
 
 | Part | Plan |
 |---|---|
-| **Suites** | Full Agent, Routines, Main Loop, Faults |
-| **Baselines** | Rules-only, LLM-only (simulator only), PayoAI, plus Investigate and Memory on/off |
-| **Data** | Synthetic cases written by a separate generator, with independently written expected results, and labelled with how they were made |
-| **Size** | About 150 cases: 90 development, 20 validation, 40 held-out |
-| **Held-out set** | Hash committed before the first run. Run once at the freeze. |
+| **Suites** | Full Agent, Routines and Faults. The planned Main Loop suite isn't in the runner, and is covered by `tests/test_main_loop.py`. |
+| **Baselines** | Rules-only, LLM-only (simulator only) and PayoAI. The Investigate and Memory on/off variations aren't in the runner. |
+| **Data** | Synthetic cases from one generator, `evals/generators/cases.py`, with expected results stated in each scenario's definition. The same team wrote the generator and the agent, so they aren't independent. See `deck/DATA.md`. |
+| **Size** | 150 cases: 90 development, 20 validation, 40 held-out |
+| **Held-out set** | Hash in `evals/cases/MANIFEST.json`, checked before each run. Run once at the freeze. |
 | **Recorded** | Unsafe executions, wrong recipients, duplicates, completion, false blocks, extraction accuracy, truthfulness, latency, real cost per decision |
-| **Reported** | Counts such as "0 of 40", with failures and limits shown |
+| **Reported** | Counts in the form "N of 40", with failures and limits shown |
 
 The kit in the organisers' zip isn't used.
 
@@ -302,29 +319,31 @@ The kit in the organisers' zip isn't used.
 
 | Process | Variables |
 |---|---|
-| `agent-worker` | `GEMINI_API_KEY` |
-| `money-worker` | `AIRWALLEX_*`, `WISE_*`, `CIRCLE_*`, `TESTNET_SIGNER_KEY`, `CHAIN_RPC_URL` |
-| `api` | `WEBHOOK_SECRET_*`, `SESSION_SECRET` |
-| All | `DATABASE_URL`, `PROVIDER_MODE` (`simulator` or `sandbox`) |
+| `agent-worker` (`.env.agent`) | `GEMINI_API_KEY` |
+| `money-worker` (`.env.money`) | `AIRWALLEX_API_KEY`, `WISE_API_TOKEN`, `CIRCLE_API_KEY`, `TESTNET_SIGNER_KEY`, `CHAIN_RPC_URL`, `TEST_CARD_TOKEN` |
+| `api` (`.env.api`) | `WEBHOOK_SECRET_SIMULATOR`, `SESSION_SECRET` |
+| All (`.env.shared`) | `DATABASE_URL`, `PROVIDER_MODE` |
 
-Keys are added to local env files by hand and are never pasted into chat.
+Only `TEST_CARD_TOKEN` is read from the `.env.money` names today, because the other names belong to rails that aren't built. No code reads `PROVIDER_MODE` yet. Keys are added to local env files by hand and are never pasted into chat.
 
-## 12. Things Stage 1 must establish
+## 12. Things Stage 1 had to establish
 
-| Question | If the answer is no |
-|---|---|
-| Does the Gemini key work with Argon and Flash, and are credits enough? | Stop and fix this first |
-| How does Gemini report safety blocks? | Treat any unclear result as a failed step |
-| Does LangGraph restart a paused Node on resume? | The design is safe either way, because pauses have their own Nodes |
-| Does the database connect? | Yes, through the IPv4 pooler, because this network has no IPv6 |
-| Can we pay out in the Airwallex sandbox? | Use Wise or the simulator, and say so |
-| Can we create transfers in the Wise sandbox? | Use Airwallex or the simulator, and say so |
-| Is testnet USDC available with local signing? | Clearly label a simulated crypto rail |
-| Do sandboxes enforce idempotency keys? | Rely on never resending without knowing the outcome, which is already the rule |
+| Question | Fallback if the answer is no | Where it stands |
+|---|---|---|
+| Does the Gemini key work with Argon and Flash, and are credits enough? | Stop and fix this first | Commit `4242a94` records fixes from a first live run. Credits aren't recorded in the repository. |
+| How does Gemini report safety blocks? | Treat any unclear result as a failed step | `agent/llm.py` applies the fallback |
+| Does LangGraph restart a paused Node on resume? | The design is safe either way, because pauses have their own Nodes | The design relies on the fallback |
+| Does the database connect? | Yes, through the IPv4 pooler, because this network has no IPv6 | In use |
+| Can we pay out in the Airwallex sandbox? | Use Wise or the simulator, and say so | Not built. The simulator is used. |
+| Can we create transfers in the Wise sandbox? | Use Airwallex or the simulator, and say so | Not built. The simulator is used. |
+| Is testnet USDC available with local signing? | Clearly label a simulated crypto rail | Not built. Crypto is simulated and labelled. |
+| Do sandboxes enforce idempotency keys? | Rely on never resending without knowing the outcome, which is already the rule | Untested on any real provider |
 
 Evaluation runs on the simulator and doesn't need the real rails, so a blocked sandbox can't block the submission.
 
-## 13. Schedule
+## 13. Original schedule
+
+This is the schedule as planned, kept for the record.
 
 Times assume the submission is due at 18:00 on Sunday. **Confirm the exact time**, because the guide also mentions Sunday afternoon judging. Everything moves earlier if it's sooner.
 
@@ -353,9 +372,33 @@ Times assume the submission is due at 18:00 on Sunday. **Confirm the exact time*
 
 ## 14. Definition of done
 
+These are the targets, and this list doesn't say which have passed.
+
 - A Pay Bill flow runs from an uploaded synthetic invoice to a reconciled expense, with every step traceable.
 - A changed wallet is blocked on screen, and a timeout after sending produces no duplicate.
 - An Operator can't approve, and a revoked Approver is refused.
 - Held-out results are reported honestly, with at least one failure or limit disclosed.
 - The public repo has a short README naming the user problem, exact model IDs and the verification loop, with no secrets.
 - The deck covers the problem, who it helps, the data, the benchmark, the agent's limits and risk controls, and the key statistics.
+
+## 15. Where the build differs from the plan
+
+Each row was checked against the code at commit `d94d88b`.
+
+| Plan | What was built | Evidence |
+|---|---|---|
+| Main Loop on LangGraph | A plain loop, because Gemini's API stores the conversation | `agent/main_loop.py`, note in ADR 0001 |
+| Investigate as a capped tool loop with Read Tools | Code gathers records, then one LLM call | `investigate` and `_related_records` in `routines/nodes/decision.py` |
+| Pay Someone with its own Node order | Runs the shared order: Check Duplicates, Check Amount, Select Destination, Check Destination, Select Source Account, Check Cash | `_add_checks` in `routines/graphs/payment.py` |
+| Purchase Checkout scripted with Playwright | Fixed HTTP calls against the test shop | `routines/purchases.py`, `merchant_site/app.py` |
+| Migrations | Numbered SQL files, as planned | `migrations/`, `db/migrate.py` |
+| Next.js frontend | Static page in `web/`, served by the API, pending the user's design | `index` route in `api/app.py` |
+| Postgres | Supabase in a private schema, with prepared statements off for the pooler | `db/__init__.py` |
+| Airwallex, Wise and Circle rails | Not built. The simulator is the only rail. | `providers/` |
+| Crypto signing and broadcasting | Not built. `signed_tx` and `tx_hash` columns exist but are unused. | `money/execute.py`, `migrations/0001_core.sql` |
+| Four evaluation suites and on/off variations | Three suites, and no variations | `SUITE_FILTER` in `evals/runner.py` |
+| Tests in CI | No CI is configured | No workflow files in the repository |
+| One LangGraph file per Routine, and versioned prompt files | Two graph files, and inline prompts | `routines/graphs/`, `agent/` |
+| Developer Console screens | API routes only, as far as the code at this commit shows | `/api/dev` routes in `api/app.py` |
+
+Routine-level differences are in `docs/routines.md`.

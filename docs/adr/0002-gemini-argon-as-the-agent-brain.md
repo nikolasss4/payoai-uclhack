@@ -35,3 +35,15 @@ The UCL AgentVerse 2026 builder guide provides Gemini API credits and recommends
 - Argon has no free tier, so the build depends on event credits. Its price doubles on 1 December 2026, and Gemini 3.8 Flash's doubles on 1 January 2027.
 - Sampling settings such as `temperature` are ignored on Argon, so outputs can't be forced to repeat. The LLM judge's variance is measured by repeating a sample.
 - Our documentation check didn't establish how safety blocks are reported, or what happens if stored history is edited. These need testing early, and any unclear result counts as a failed step.
+
+## Note added after the build (2026-11-07)
+
+The model table above matches `src/payoai/agent/config.py`, which adds two smaller steps: category suggestion and draft request, both on `gemini-3.8-flash` at `low`.
+
+Three items in this ADR differ from the build or can't be confirmed from it:
+
+- **Investigate doesn't run in the background.** It runs inside its Node. Code gathers the related records, and the model gets them in one call, with no tool loop. See `investigate` in `src/payoai/routines/nodes/decision.py`.
+- **The Extract Fields comparison isn't recorded.** `extract_fields` is set to `medium`, but nothing in the repository records a comparison at `medium` and `low`.
+- **The judge's variance isn't measured by the code.** `evals/runner.py` can score a sample with `--judge-sample`, but it doesn't repeat a sample to measure variance.
+
+`src/payoai/agent/llm.py` treats any status other than `completed`, empty output or invalid JSON as a failed step. This holds whichever way safety blocks turn out to be reported.

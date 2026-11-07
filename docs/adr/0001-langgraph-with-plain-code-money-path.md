@@ -25,3 +25,11 @@ During an LLM outage, approvals, execution, reconciliation, Pause All Payments a
 ## Consequences
 
 Two execution models must be understood. Approval taps and payment execution are handled outside the graph, so a Routine hands over to the money path rather than running it.
+
+## Note added after the build (2026-11-07)
+
+The decision above stands for Routines and the money path, with one change: **the Main Loop is a plain Python loop, not a LangGraph graph.** Gemini's Interactions API stores the conversation, using `previous_interaction_id`, so the loop has no conversation state for a checkpoint to hold. See `src/payoai/agent/main_loop.py`. Routines still run on LangGraph with the Postgres checkpointer (`src/payoai/routines/engine.py`), and Execute Payment and Reconcile Payment are plain code as decided.
+
+Some Routines turned out simpler than a graph needs to be. Prepare Batch, Purchase Checkout and several others are one-Node graphs. Verify Destination is plain code behind an API route, and the second half of Purchase Checkout runs as plain code in `money-worker`. `docs/routines.md` gives each Routine's status.
+
+A Routine's graph now ends when the payment is prepared, rather than pausing at Await Approval. The approval is a database record, and the tap updates `routine_runs.status` directly, without resuming a graph. The only pauses left are questions in chat, which live in their own Node with no side effects. That makes resume restarting a Node harmless, so the design doesn't depend on the behaviour this ADR asked the spike to confirm.
