@@ -8,6 +8,7 @@ from langgraph.types import interrupt
 
 from payoai.db import Jsonb, new_id, tx
 from payoai.domain.decide import POLICY_VERSION
+from payoai.events import chat_of_run, emit
 from payoai.trace import TraceContext, step
 
 
@@ -52,6 +53,7 @@ def node(name: str, step_type: str = "NODE", trust_label: str = "TRUSTED"):
         @wraps(fn)
         def wrapper(state: RunState) -> dict:
             ctx = TraceContext(state["team_id"], run_id=state["run_id"], turn_id=state.get("turn_id"))
+            emit(state["team_id"], chat_of_run(state["run_id"]), "STATUS", {"node": name}, turn_id=state.get("turn_id"), run_id=state["run_id"])
             with step(ctx, step_type, name, input=_summary(state), trust_label=trust_label) as s:
                 out = fn(state, ctx) or {}
                 s.output = out

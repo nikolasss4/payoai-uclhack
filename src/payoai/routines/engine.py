@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from payoai.db import Jsonb, fetch_one, new_id, tx
+from payoai.events import emit
 from payoai.routines.registry import get_routine
 from payoai.settings import schema
 from payoai.trace import TraceContext, step
@@ -128,8 +129,22 @@ def _drive(row: dict, payload) -> dict:
     snapshot = graph.get_state(config)
     interrupts = [i for task in snapshot.tasks for i in task.interrupts]
     if interrupts:
-        return _pause(run_id, team_id, row["started_turn_id"], interrupts[0].value)
-    return _finish(run_id, snapshot.values)
+        outcome = _pause(run_id, team_id, row["started_turn_id"], interrupts[0].value)
+        emit(team_id, row["chat_id"], "QUESTION", {"question_id": outcome["question_id"], **outcome["question"]}, turn_id=row["started_turn_id"], run_id=run_id)
+        return outcome
+    outcome = _finish(run_id, snapshot.values)
+    _emit_outcome(team_id, row, outcome)
+    return outcome
+
+
+def _emit_outcome(team_id: str, row: dict, outcome: dict) -> None:
+    run_id, chat_id, turn_id = row["id"], row["chat_id"], row["started_turn_id"]
+    if outcome.get("approval_id"):
+        emit(team_id, chat_id, "APPROVAL_CARD", {"approval_id": outcome["approval_id"]}, turn_id=turn_id, run_id=run_id)
+    for item in outcome.get("items") or []:
+        if item.get("approval_id"):
+            emit(team_id, chat_id, "APPROVAL_CARD", {"approval_id": item["approval_id"]}, turn_id=turn_id, run_id=run_id)
+    emit(team_id, chat_id, "STATUS", {"routine": row["routine"], "run_id": run_id, "finished": True, "status": outcome["status"], "decision": outcome.get("decision"), "stop": outcome.get("stop"), "explanation": outcome.get("explanation"), "counts": outcome.get("counts")}, turn_id=turn_id, run_id=run_id)
 
 
 def _pause(run_id: str, team_id: str, turn_id: str | None, pending: dict) -> dict:
