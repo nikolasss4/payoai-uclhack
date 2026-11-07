@@ -129,6 +129,31 @@ def load_document_for_replacement(state: RunState, ctx) -> dict:
     return {}
 
 
+@node("Load Bill Document")
+def load_bill_document(state: RunState, ctx) -> dict:
+    """Check Bill Compliance on a bill already registered: its own file, and its extraction if it has one."""
+    with tx() as conn:
+        row = fetch_one(
+            conn,
+            """
+            SELECT o.document_id, d.storage_path, d.sha256, e.id AS extraction_id, e.fields, e.failed_quotes
+            FROM obligations o LEFT JOIN documents d ON d.id = o.document_id AND d.team_id = o.team_id
+            LEFT JOIN extractions e ON e.id = o.extraction_id
+            WHERE o.id = %s AND o.team_id = %s
+            """,
+            (state["inputs"]["obligation_id"], state["team_id"]),
+        )
+    if row is None:
+        return {"stop": "That bill wasn't found in this team."}
+    if row["document_id"] is None or row["storage_path"] is None:
+        return {"stop": "This bill has no document to check."}
+    if hashlib.sha256(Path(row["storage_path"]).read_bytes()).hexdigest() != row["sha256"]:
+        return {"stop": "The stored document no longer matches its hash, so it can't be used."}
+    if row["fields"]:
+        return {"document_id": row["document_id"], "extraction_id": row["extraction_id"], "fields": row["fields"], "failed_quotes": row["failed_quotes"] or []}
+    return {"document_id": row["document_id"]}
+
+
 @node("Extract Fields", trust_label="UNTRUSTED")
 def extract_fields(state: RunState, ctx) -> dict:
     with tx() as conn:

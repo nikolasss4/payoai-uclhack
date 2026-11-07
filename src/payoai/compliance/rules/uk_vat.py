@@ -18,6 +18,9 @@ ROUNDING_TOLERANCE_PER_LINE_MINOR = 1
 # The number's format only. No source was confirmed for this pattern, and nothing is checked with HMRC.
 VAT_NUMBER = re.compile(r"^(GB)?\s*\d{3}\s*\d{4}\s*\d{2}(\s*\d{3})?$", re.I)
 SIMPLIFIED_LIMIT_MINOR = 25000
+# A UK postcode, or the country named, shows a UK address. A London street name alone doesn't.
+UK_POSTCODE = re.compile(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", re.I)
+UK_NAMED = re.compile(r"\b(united kingdom|uk|england|scotland|wales|northern ireland|great britain)\b", re.I)
 
 FULL_VAT_FIELDS = {
     "invoice_number": "a unique invoice number",
@@ -51,8 +54,12 @@ def result(rule_id: str, outcome: str, reason: str, **evidence) -> dict:
 def classify(fields: dict) -> str:
     """FULL_VAT, NON_VAT, UNSUPPORTED or UNCLEAR, from facts on the invoice."""
     text = " ".join(str(fields.get(k) or "") for k in ("notes", "vat_treatment")).lower()
+    if "reverse charge" in text:
+        return "UNSUPPORTED"
+    if not _country_known(fields):
+        return "UNCLEAR"
     country = (fields.get("supplier_country") or "GB").upper()
-    if "reverse charge" in text or country not in ("GB", "UK", "UNITED KINGDOM"):
+    if country not in ("GB", "UK", "UNITED KINGDOM"):
         return "UNSUPPORTED"
     vat_total = _money(fields, "vat_total", "GBP")
     line_vat = any(_money(line, "vat", "GBP") for line in fields.get("line_items") or [])
@@ -68,6 +75,14 @@ def classify(fields: dict) -> str:
     return "UNCLEAR"
 
 
+def _country_known(fields: dict) -> bool:
+    """A missing country is only assumed to be the UK when the supplier's address clearly shows it."""
+    if fields.get("supplier_country"):
+        return True
+    address = str(fields.get("supplier_address") or "")
+    return bool(UK_POSTCODE.search(address) or UK_NAMED.search(address))
+
+
 def evaluate(fields: dict) -> list[dict]:
     asset = (fields.get("currency") or "").upper()
     out: list[dict] = []
@@ -79,6 +94,10 @@ def evaluate(fields: dict) -> list[dict]:
     kind = classify(fields)
     if kind == "UNSUPPORTED":
         out.append(result("UK-UNSUPPORTED-TYPE", "NEEDS_REVIEW", "This invoice type (foreign supplier, foreign currency or reverse charge) isn't checked by this ruleset, so no compliance result is given."))
+        return out
+    if kind == "UNCLEAR" and not _country_known(fields):
+        out.append(result("UK-UNCLEAR-COUNTRY", "NEEDS_REVIEW", "The invoice doesn't show the supplier's country and its address doesn't clearly show the UK, so UK rules weren't assumed."))
+        out.extend(_arithmetic(fields, asset))
         return out
     if kind == "UNCLEAR":
         out.append(result("UK-UNCLEAR-TYPE", "NEEDS_REVIEW", "The invoice shows a VAT number but charges no VAT, so its treatment is unclear and isn't assumed."))

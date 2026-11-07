@@ -67,10 +67,13 @@ def replace_bill() -> StateGraph:
 def check_bill_compliance() -> StateGraph:
     g = StateGraph(RunState)
     g.add_node("load_document", documents.load_document)
+    g.add_node("load_bill_document", documents.load_bill_document)
     g.add_node("extract_fields", documents.extract_fields)
     g.add_node("report", extra.compliance_report)
     g.add_node("explain", decision.explain_without_decision_record)
-    g.add_edge(START, "load_document")
+    g.add_conditional_edges(START, lambda s: "load_bill_document" if s["inputs"].get("obligation_id") else "load_document")
+    # A registered bill reuses its extraction, so checking it again costs no model call.
+    g.add_conditional_edges("load_bill_document", lambda s: END if s.get("stop") else "report" if s.get("fields") else "extract_fields")
     g.add_conditional_edges("load_document", _after("extract_fields"))
     g.add_conditional_edges("extract_fields", _after("report"))
     g.add_edge("report", "explain")

@@ -327,6 +327,10 @@ def test_crash_after_recording_an_attempt_goes_to_unknown(biz, fake_model):
     from payoai.trace import TraceContext
 
     execute._record_attempt(TraceContext(biz["team"]["id"], run_id=result["run_id"]), intent, result["approval_id"])
+    # Just recorded, so it could still be sending in another run: nothing changes yet.
+    assert run_execute(biz, result)["status"] == "IN_PROGRESS"
+    with tx() as conn:
+        conn.execute("UPDATE payment_attempts SET created_at = now() - interval '11 minutes' WHERE intent_id = %s", (result["intent_id"],))
     assert run_execute(biz, result)["status"] == "UNKNOWN"
     assert ledger("INV-T4") == []
 
