@@ -7,11 +7,14 @@ The held-out split needs --unlock-heldout, and every run is logged.
 import argparse
 import hashlib
 import json
+import re
 import statistics
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from payoai.settings import load_env
@@ -32,6 +35,11 @@ CASES = ROOT / "cases"
 RESULTS = ROOT / "results"
 SUPPLIER_CP = "cp"
 UNLOCK = "I am running the locked held-out set"
+
+
+# Replaces the model per thread, so suites can run in parallel without sharing a fake.
+# Also remembers each thread's team, so a crashed case still reports what it spent.
+_local = threading.local()
 
 
 @dataclass
@@ -55,6 +63,7 @@ def load_cases(split: str) -> list[dict]:
 def setup_team(case: dict) -> Team:
     """A new synthetic team per case, so cases can't affect each other. Provider references are unique per team."""
     team_id = new_id("evalteam")
+    _local.team_id = team_id
     operator, approver = new_id("evo"), new_id("eva")
     cp, dest, account = new_id("cp"), new_id("dest"), new_id("acct")
     external = f"sim_{team_id}"
@@ -90,18 +99,21 @@ def unique_fields(case: dict, team: Team) -> dict:
     return fields
 
 
-# Replaces the model per thread, so suites can run in parallel without sharing a fake.
-_local = threading.local()
-
-
 def _thread_fake(step_name, parts, schema):
     return _local.fake(step_name, parts, schema)
+
+
+SUSPICIOUS = ("agent", "assistant", "ignore", "system")
+
+
+def _suspicious(notes: str | None) -> list[str]:
+    return [notes] if notes and any(w in notes.lower() for w in SUSPICIOUS) else []
 
 
 def faithful_extraction(fields: dict, text: str):
     def fake(step_name, parts, schema):
         if step_name == "extract_fields":
-            return {**fields, "quotes": quotes_for(text, fields), "suspicious_text": [fields["notes"]] if fields.get("notes") and any(w in fields["notes"].lower() for w in ("agent", "assistant", "ignore", "system")) else []}
+            return {**fields, "quotes": quotes_for(text, fields), "suspicious_text": _suspicious(fields.get("notes"))}
         if step_name == "investigate":
             return {"findings": []}
         return {"explanation": "Check complete."}
@@ -109,18 +121,34 @@ def faithful_extraction(fields: dict, text: str):
     return fake
 
 
+LABELLED_LINE = re.compile(r"^(INVOICE |From: |VAT number: |To: |Date: |Due date: |Subtotal: |VAT: |Total due: |IBAN: |Sort code: |Account number: |Wallet: |Chain ID: |Token contract: )")
+LINE_ITEM = re.compile(r"^(.+): quantity (\S+), unit price (\S+), net (\S+), VAT at (\S+)%: (\S+)$", re.M)
+
+
+def _country_of(address: str | None) -> str:
+    """UK addresses here end in a postcode. A last part with no digits is a named country, so it isn't GB."""
+    last = (address or "").rsplit(",", 1)[-1].strip()
+    return "XX" if last and not re.search(r"\d", last) else "GB"
+
+
 def rules_only_extraction(text: str):
     """The baseline: template extraction for the labelled layout only, with no LLM steps at all."""
-    import re
 
     def field(pattern):
         match = re.search(pattern, text)
-        return match.group(1).strip() if match else None
+        value = match.group(1).strip() if match else None
+        return None if value in ("", "None", "-") else value
 
+    def absent(value):
+        return None if value == "-" else value
+
+    address = field(r"From: [^,\n]+, (.+)")
+    notes = [ln for ln in text.splitlines() if ln.strip() and not LABELLED_LINE.match(ln) and not LINE_ITEM.match(ln)]
+    payment_labels = {"iban": r"IBAN: (\S+)", "sort_code": r"Sort code: (\S+)", "account_number": r"Account number: (\S+)", "wallet_address": r"Wallet: (\S+)", "chain_id": r"Chain ID: (\S+)", "token_contract": r"Token contract: (\S+)"}
     extracted = {
         "supplier_name": (field(r"From: ([^,\n]+(?:Ltd|LLP))") or field(r"From: ([^,\n]+)")),
-        "supplier_address": field(r"From: [^,\n]+, (.+)"),
-        "supplier_country": "GB",
+        "supplier_address": address,
+        "supplier_country": _country_of(address),
         "vat_number": field(r"VAT number: (\S+)"),
         "invoice_number": field(r"INVOICE (\S+)"),
         "issue_date": field(r"Date: (\S+)"),
@@ -131,11 +159,15 @@ def rules_only_extraction(text: str):
         "subtotal": field(r"Subtotal: (\S+)"),
         "vat_total": field(r"\nVAT: (\S+)"),
         "total": field(r"Total due: (\S+)"),
-        "line_items": [],
-        "payment_details": {k: v for k, v in {"iban": field(r"IBAN: (\S+)"), "wallet_address": field(r"Wallet: (\S+)"), "chain_id": field(r"Chain ID: (\S+)"), "token_contract": field(r"Token contract: (\S+)")}.items() if v},
+        "notes": " ".join(notes) or None,
+        "line_items": [
+            {"description": m[0], "quantity": absent(m[1]), "unit_price": absent(m[2]), "net": absent(m[3]), "vat_rate": absent(m[4]), "vat": absent(m[5])}
+            for m in LINE_ITEM.findall(text)
+        ],
+        "payment_details": {k: v for k, v in ((k, field(p)) for k, p in payment_labels.items()) if v},
     }
     extracted["quotes"] = quotes_for(text, extracted)
-    extracted["suspicious_text"] = []
+    extracted["suspicious_text"] = _suspicious(extracted["notes"])
 
     def fake(step_name, parts, schema):
         if step_name == "extract_fields":
@@ -207,7 +239,7 @@ def observe(case: dict, team: Team, result: dict, reference: str, extra: dict | 
     }
 
 
-def run_routine_case(case: dict, fake_builder) -> dict:
+def run_routine_case(case: dict, fake_builder, record_extraction: bool = False) -> dict:
     """The Routines and Faults suites: Routine inputs directly, with no Main Loop."""
     team = setup_team(case)
     fields = unique_fields(case, team)
@@ -219,7 +251,19 @@ def run_routine_case(case: dict, fake_builder) -> dict:
     add_prior(case, team, fields)
     result = engine.start("pay_bill", team.id, {"document_id": document}, "EVAL", actor=team.operator)
     extra = human_approves(case, team, result)
-    return observe(case, team, result, fields["invoice_number"], extra)
+    observed = observe(case, team, result, fields["invoice_number"], extra)
+    if record_extraction:
+        # Only for the baseline. The suite's faked extraction would score itself.
+        with tx() as conn:
+            extraction = fetch_one(conn, "SELECT fields FROM extractions WHERE team_id = %s ORDER BY created_at DESC LIMIT 1", (team.id,))
+        if extraction:
+            observed["extraction"] = extraction_accuracy(fields, extraction["fields"])
+    return observed
+
+
+def team_cost_micros(team_id: str) -> int:
+    with tx() as conn:
+        return int(fetch_one(conn, "SELECT COALESCE(sum(cost_micros), 0) AS n FROM trace_steps WHERE team_id = %s", (team_id,))["n"])
 
 
 def run_full_agent_case(case: dict, judge: bool = False) -> dict:
@@ -256,12 +300,16 @@ def run_full_agent_case(case: dict, judge: bool = False) -> dict:
             observed["semantic"] = semantic(team.id, result["explanation"], {"run_id": result.get("run_id"), "decision": result.get("decision"), "reasons": result.get("reasons"), "scenario": case["scenario"]})
         except llm.LLMFailure as exc:
             observed["semantic"] = {"error": str(exc)[:200]}
+        # The judge's cost is real spend, but it isn't what the case cost to decide.
+        observed["judge_cost_micros"] = team_cost_micros(team.id) - observed["cost_micros"]
     return observed
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
     if not values:
         return None
+    if fraction == 0.5:
+        return statistics.median(values)
     ordered = sorted(values)
     return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
 
@@ -281,7 +329,9 @@ def summarise(rows: list[dict]) -> dict:
         "passed": sum(r["judged"]["passed"] for r in rows),
         "errors": sum(1 for r in rows if r["observed"].get("error")),
         "unsafe_executions": sum(1 for r in rows if r["judged"]["unsafe"]),
+        "unsafe_by_kind": dict(sorted(Counter(kind for r in rows for kind in r["judged"]["unsafe"]).items())),
         "wrong_recipient": sum(1 for r in rows if "wrong_recipient" in r["judged"]["unsafe"]),
+        "wrong_amount": sum(1 for r in rows if "wrong_amount" in r["judged"]["unsafe"]),
         "duplicate_or_unauthorised": sum(1 for r in rows if "duplicate_or_unauthorised_payment" in r["judged"]["unsafe"]),
         "paid_when_it_should_not": sum(1 for r in rows if "paid_when_it_should_not" in r["judged"]["unsafe"]),
         "legitimate_cases": len(legit),
@@ -298,13 +348,19 @@ def summarise(rows: list[dict]) -> dict:
         "latency_ms_p95": percentile([r["latency_ms"] for r in rows], 0.95),
         "cost_usd_total": round(sum(r["observed"].get("cost_micros", 0) for r in rows) / 1_000_000, 4),
         "cost_usd_per_case": round(sum(r["observed"].get("cost_micros", 0) for r in rows) / 1_000_000 / max(total, 1), 5),
+        "judge_cost_usd_total": round(sum(r["observed"].get("judge_cost_micros", 0) for r in rows) / 1_000_000, 4),
         "failures": [{"case": r["case"]["id"], "failures": r["judged"]["failures"]} for r in rows if not r["judged"]["passed"]][:40],
     }
 
 
 def run_case(case: dict, suite: str, system: str, judge: bool) -> dict:
     start = time.time()
+    _local.team_id = None
     try:
+        if suite == "main_loop":
+            from evals.main_loop_suite import run_case as run_main_loop_case
+
+            return {**run_main_loop_case(case, judge), "latency_ms": int((time.time() - start) * 1000)}
         if system == "llm_only":
             from evals.baselines.llm_only import run_llm_only_case
 
@@ -312,23 +368,57 @@ def run_case(case: dict, suite: str, system: str, judge: bool) -> dict:
         elif suite == "full_agent":
             observed = run_full_agent_case(case, judge=judge)
         elif system == "rules_only":
-            observed = run_routine_case(case, lambda fields, text: rules_only_extraction(text))
+            observed = run_routine_case(case, lambda fields, text: rules_only_extraction(text), record_extraction=True)
         else:
             observed = run_routine_case(case, faithful_extraction)
     except Exception as exc:  # A crashed case is a recorded failure, not a skipped one.
         observed = {"error": f"{type(exc).__name__}: {exc}"[:500], "ledger": [], "decision": None, "attempt_state": None}
-    judged = deterministic(case, observed)
+        team_id = getattr(_local, "team_id", None)
+        if team_id:
+            observed["cost_micros"] = team_cost_micros(team_id)
+    judged = deterministic(case, observed) if suite != "main_loop" else {"passed": False, "failures": [], "unsafe": [], "truthful": True}
     if observed.get("error"):
         judged["passed"] = False
         judged["failures"].insert(0, observed["error"])
     return {"case": case, "observed": observed, "judged": judged, "latency_ms": int((time.time() - start) * 1000)}
 
 
-SUITE_FILTER = {"routines": lambda c: c["category"] != "faults", "faults": lambda c: c["category"] == "faults", "full_agent": lambda c: True}
+SUITE_FILTER = {"routines": lambda c: c["category"] != "faults", "faults": lambda c: c["category"] == "faults", "full_agent": lambda c: True, "main_loop": lambda c: True}
+
+
+def compact_row(row: dict) -> dict:
+    """The per-case record kept in the results file, so the report can show its evidence."""
+    case, observed, judged = row["case"], row["observed"], row["judged"]
+    return {
+        "id": case["id"],
+        "category": case["category"],
+        "scenario": case.get("scenario"),
+        "layout": case.get("layout"),
+        "passed": judged["passed"],
+        "failures": judged["failures"],
+        "unsafe": judged["unsafe"],
+        "truthful": judged["truthful"],
+        "latency_ms": row["latency_ms"],
+        "cost_micros": observed.get("cost_micros", 0),
+        **{k: observed[k] for k in ("error", "decision", "attempt_state", "stop", "extraction", "semantic", "reply", "explanation", "sends", "routines_started", "reads", "blocked_by_code", "reply_status") if observed.get(k) is not None},
+    }
+
+
+def model_label(suite: str, system: str) -> str:
+    if system == "rules_only":
+        return "none"
+    return "real" if system == "llm_only" or suite in ("full_agent", "main_loop") else "faked"
 
 
 def run(suite: str, split: str, system: str = "payoai", limit: int | None = None, workers: int = 4, judge_sample: int = 0, eval_run_id: str | None = None, case_id: str | None = None) -> dict:
-    cases = [c for c in load_cases(split) if SUITE_FILTER[suite](c)]
+    if suite == "main_loop":
+        if system != "payoai":
+            raise SystemExit("The Main Loop suite has no baseline.")
+        from evals.main_loop_suite import load_main_loop_cases
+
+        cases = load_main_loop_cases(split)
+    else:
+        cases = [c for c in load_cases(split) if SUITE_FILTER[suite](c)]
     if case_id:
         cases = [c for c in cases if c["id"] == case_id]
     if limit:
@@ -341,7 +431,7 @@ def run(suite: str, split: str, system: str = "payoai", limit: int | None = None
             "INSERT INTO eval_runs (id, suite, system, split, config) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
             (eval_run_id, suite, system, split, Jsonb({"limit": limit, "workers": workers, "provider": "simulator", "synthetic": True})),
         )
-    if system != "llm_only" and suite != "full_agent":
+    if model_label(suite, system) != "real":
         llm.set_fake(_thread_fake)
     judged_ids = {c["id"] for c in cases[:: max(1, len(cases) // judge_sample)]} if judge_sample else set()
     rows = []
@@ -360,11 +450,12 @@ def run(suite: str, split: str, system: str = "payoai", limit: int | None = None
                     )
     finally:
         llm.set_fake(None)
-    summary = {"eval_run_id": eval_run_id, "suite": suite, "system": system, "split": split, "provider": "simulator", "data": "synthetic", **summarise(rows)}
+    summary = {"eval_run_id": eval_run_id, "suite": suite, "system": system, "split": split, "provider": "simulator", "data": "synthetic", "model": model_label(suite, system), "limit": limit, "finished_at": datetime.now(timezone.utc).isoformat(), **summarise(rows)}
     with tx() as conn:
         conn.execute("UPDATE eval_runs SET summary = %s WHERE id = %s", (Jsonb(summary), eval_run_id))
     RESULTS.mkdir(exist_ok=True)
-    (RESULTS / f"{split}-{suite}-{system}-{eval_run_id}.json").write_text(json.dumps(summary, indent=2, default=str))
+    saved = {**summary, "rows": [compact_row(r) for r in rows]}
+    (RESULTS / f"{split}-{suite}-{system}-{eval_run_id}.json").write_text(json.dumps(saved, indent=2, default=str))
     return summary
 
 

@@ -14,6 +14,10 @@
     "heldout.jsonl": {
       "cases": 40,
       "sha256": "2ba6dd463a721fdc93e17a9439f7e9079bc7b3c4ec2aabf4689d3b7f649850fe"
+    },
+    "main_loop.jsonl": {
+      "cases": 30,
+      "sha256": "4a4c64a898125e7e7df27e4d092266914664d39f9f97b22c28338f894e259703"
     }
   }
 }
