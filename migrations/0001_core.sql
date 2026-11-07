@@ -367,6 +367,7 @@ CREATE TABLE payment_intents (
   payload_hash text NOT NULL,
   idempotency_key text NOT NULL,
   warnings jsonb NOT NULL DEFAULT '[]',
+  requires_review boolean NOT NULL DEFAULT false,
   status text NOT NULL CHECK (status IN ('READY_FOR_APPROVAL', 'APPROVED', 'SUBMITTING', 'SUBMITTED', 'PENDING', 'CONFIRMED', 'FAILED', 'REJECTED', 'UNKNOWN', 'NEEDS_MANUAL_REVIEW', 'CANCELLED')),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
