@@ -115,7 +115,7 @@ def explain(state: RunState, ctx) -> dict:
             [
                 llm.text_part(
                     "Explain this payment check result to a busy small business owner in two or three plain sentences. "
-                    "Use only these facts. Don't add numbers, promises or advice beyond them, and don't soften a block. "
+                    "Use only these facts. Don't add numbers, promises or advice beyond them, and don't soften a block. Don't mention rule IDs or codes. "
                     f"Decision: {state.get('decision')}. Reasons: {_jsonable(state.get('reasons'))}. "
                     f"Suggestions from the agent, not facts: {_jsonable(state.get('findings'))}."
                 )

@@ -102,7 +102,7 @@ def render_invoice(fields: dict) -> str:
         f"Due date: {fields.get('due_date') or ''}",
     ]
     for line in fields.get("line_items") or []:
-        lines.append(f"{line.get('description')}: net {line.get('net')}, VAT at {line.get('vat_rate')}%: {line.get('vat')}")
+        lines.append(f"{line.get('description')}: quantity {line.get('quantity')}, unit price {line.get('unit_price')}, net {line.get('net')}, VAT at {line.get('vat_rate')}%: {line.get('vat')}")
     lines += [f"Subtotal: {fields.get('subtotal')}", f"VAT: {fields.get('vat_total')}", f"Total due: {fields.get('total')} {fields.get('currency')}"]
     for key, value in (fields.get("payment_details") or {}).items():
         if value:

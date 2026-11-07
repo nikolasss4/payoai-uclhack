@@ -25,7 +25,11 @@ def decide(team_id: str, user_id: str, approval_id: str, shown_hash: str, decisi
         return DecisionResult(False, "NOT_FOUND", "That approval isn't in this team.")
     ctx = TraceContext(team_id, run_id=row["run_id"])
     with step(ctx, "TAP", f"Approval tap: {decision}", input={"approval_id": approval_id, "user_id": user_id, "shown_hash": shown_hash}) as s:
-        if decision == "APPROVED" and row["requires_review"] and not reviewed:
+        with tx() as conn:
+            role = fetch_one(conn, "SELECT role FROM memberships WHERE team_id = %s AND user_id = %s", (team_id, user_id))
+        if not role or role["role"] != "APPROVER":
+            result = DecisionResult(False, row["status"], "Only an Approver can decide on a payment.")
+        elif decision == "APPROVED" and row["status"] == "PENDING" and row["requires_review"] and not reviewed:
             result = DecisionResult(False, row["status"], "This payment needs review. Open it and clear the warnings first.")
         else:
             result = _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, s.id)
