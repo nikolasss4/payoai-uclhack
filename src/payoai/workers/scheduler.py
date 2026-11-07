@@ -22,6 +22,7 @@ def tick() -> None:
     with tx() as conn:
         for team in fetch_all(conn, "SELECT id FROM teams WHERE NOT is_eval"):
             enqueue(conn, "cash_analysis", team["id"], {}, dedupe_key=f"cash:{team['id']}:{today}")
+            enqueue(conn, "refresh_balances", team["id"], {}, dedupe_key=f"balances:{team['id']}:{int(time.time() // 300)}")
         stale = fetch_all(conn, "SELECT id, team_id, expense_id FROM exceptions WHERE status = 'OPEN' AND COALESCE(last_reminded_at, created_at) < now() - interval '7 days'")
         for row in stale:
             notify_approvers(conn, row["team_id"], "MISSING_DOCUMENT_REMINDER", {"expense_id": row["expense_id"]}, f"remind:{row['id']}:{today}")

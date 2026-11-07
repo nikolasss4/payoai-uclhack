@@ -27,6 +27,11 @@ load_env(".env.shared", ".env.api")
 app = FastAPI(title="PayoAI", description="Synthetic data only. No real money.")
 
 
+def _fmt(minor, asset) -> str | None:
+    """Money for display, always formatted by the server."""
+    return None if minor is None or not asset else format_minor(int(minor), asset)
+
+
 def _secret() -> bytes:
     return os.environ.get("SESSION_SECRET", "local-demo-session-secret").encode()
 
@@ -255,12 +260,12 @@ def _card(conn, row: dict, me: Member) -> dict:
         "rail": row["rail"], "asset": row["asset"], "chain_id": row["chain_id"], "token_contract": row["token_contract"], "source_account": row["account_name"],
         "amount": format_minor(int(row["amount_minor"]), row["asset"]), "max_fee": format_minor(int(row["max_fee_minor"]), row["asset"]), "reference": row["payment_reference"],
         "warnings": row["warnings"], "requires_review": row["requires_review"], "decision": decision, "checks": checks, "agent_suggestions": investigation["findings"] if investigation else [],
-        "added_and_verified_by_same_person": bool(same_person and same_person["same_person_added"]), "can_decide": me.role == "APPROVER" and row["approval_status"] == "PENDING",
+        "added_and_verified_by_same_person": bool(same_person and same_person["same_person_added"]), "expired": row["is_expired"], "can_decide": me.role == "APPROVER" and row["approval_status"] == "PENDING" and not row["is_expired"],
     }
 
 
 CARD_SQL = """
-    SELECT p.*, a.id AS approval_id, a.status AS approval_status, a.expires_at, a.decided_at, u.name AS decided_name, c.display_name AS counterparty,
+    SELECT p.*, a.id AS approval_id, a.status AS approval_status, a.expires_at, a.expires_at <= now() AS is_expired, a.decided_at, u.name AS decided_name, c.display_name AS counterparty,
            d.masked_display, d.status AS destination_status, f.name AS account_name
     FROM approvals a JOIN payment_intents p ON p.id = a.intent_id JOIN counterparties c ON c.id = p.counterparty_id
     JOIN payment_destinations d ON d.id = p.destination_id JOIN financial_accounts f ON f.id = p.source_account_id LEFT JOIN users u ON u.id = a.decided_by
@@ -331,6 +336,37 @@ def decide_batch(body: BatchDecision, me: Member = Depends(member)):
 @app.get("/api/payments")
 def payments(status: str | None = None, me: Member = Depends(member)):
     return read_tools.list_payments(me.team_id, status)
+
+
+@app.get("/api/payments/{payment_id}")
+def payment(payment_id: str, me: Member = Depends(member)):
+    found = read_tools.get_payment(me.team_id, payment_id)
+    if found is None:
+        raise HTTPException(404, "Payment not found.")
+    return found
+
+
+@app.get("/api/confirmations/{confirmation_id}")
+def confirmation(confirmation_id: str, me: Member = Depends(member)):
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT id, routine, status, run_id FROM start_confirmations WHERE id = %s AND team_id = %s", (confirmation_id, me.team_id))
+    if row is None:
+        raise HTTPException(404, "Card not found.")
+    return row
+
+
+@app.get("/api/chats/{chat_id}/turns")
+def chat_turns(chat_id: str, me: Member = Depends(member)):
+    with tx() as conn:
+        _own_chat(conn, me, chat_id)
+        return fetch_all(conn, "SELECT id, seq, user_input, status, started_at FROM turns WHERE chat_id = %s ORDER BY seq", (chat_id,))
+
+
+@app.post("/api/cash/analyse")
+def start_cash_analysis(me: Member = Depends(member)):
+    with tx() as conn:
+        enqueue(conn, "cash_analysis", me.team_id, {})
+    return {"status": "QUEUED"}
 
 
 @app.get("/api/payments/{payment_id}/trace")
@@ -449,7 +485,8 @@ def revoke(destination_id: str, body: dict, me: Member = Depends(member)):
 @app.get("/api/mandates")
 def mandates(me: Member = Depends(member)):
     with tx() as conn:
-        return fetch_all(conn, "SELECT m.id, m.status, m.max_amount_minor, m.asset, m.valid_until, m.purpose, c.display_name AS counterparty, r.frequency, r.next_due FROM mandates m JOIN counterparties c ON c.id = m.counterparty_id LEFT JOIN automation_rules r ON r.mandate_id = m.id WHERE m.team_id = %s ORDER BY m.created_at DESC", (me.team_id,))
+        rows = fetch_all(conn, "SELECT m.id, m.status, m.max_amount_minor, m.asset, m.valid_until, m.purpose, c.display_name AS counterparty, r.frequency, r.next_due FROM mandates m JOIN counterparties c ON c.id = m.counterparty_id LEFT JOIN automation_rules r ON r.mandate_id = m.id WHERE m.team_id = %s ORDER BY m.created_at DESC", (me.team_id,))
+    return [{**r, "max_amount": _fmt(r["max_amount_minor"], r["asset"])} for r in rows]
 
 
 @app.post("/api/mandates/{mandate_id}/{action}")
@@ -479,9 +516,12 @@ def expense(expense_id: str, me: Member = Depends(member)):
         versions = fetch_all(conn, "SELECT * FROM expense_versions WHERE team_id = %s AND expense_id = %s ORDER BY version", (me.team_id, expense_id))
         if not versions:
             raise HTTPException(404)
+        journal = fetch_all(conn, "SELECT kind, lines, reviewed FROM journal_proposals WHERE expense_id = %s", (expense_id,))
+        for entry in journal:
+            entry["lines"] = [{**line, "debit": _fmt(line.get("debit_minor"), line.get("asset")), "credit": _fmt(line.get("credit_minor"), line.get("asset"))} for line in entry["lines"]]
         return {
-            "versions": versions,
-            "journal": fetch_all(conn, "SELECT kind, lines, reviewed FROM journal_proposals WHERE expense_id = %s", (expense_id,)),
+            "versions": [{**v, "gross": _fmt(v["gross_minor"], v["asset"]), "net": _fmt(v["net_minor"], v["asset"]), "tax": _fmt(v["tax_minor"], v["asset"])} for v in versions],
+            "journal": journal,
             "exceptions": fetch_all(conn, "SELECT kind, status, details FROM exceptions WHERE expense_id = %s", (expense_id,)),
             "label": "Prepared for accountant review, not certified compliant.",
         }

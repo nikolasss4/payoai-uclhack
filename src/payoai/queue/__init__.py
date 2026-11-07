@@ -37,7 +37,7 @@ def claim(worker: str, kinds: list[str]) -> dict | None:
             WHERE id = (
                 SELECT id FROM jobs
                 WHERE status = 'QUEUED' AND kind = ANY(%s) AND run_at <= now()
-                ORDER BY run_at
+                ORDER BY (kind = 'run_turn') DESC, run_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )

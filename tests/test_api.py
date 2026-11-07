@@ -121,3 +121,24 @@ def test_developer_console_is_separate_and_synthetic_only(biz):
     h = {"Authorization": f"Bearer {_sign(dev)}"}
     assert client.get(f"/api/dev/traces/{biz['team']['id']}", headers=h).status_code == 403
     assert client.post("/api/dev/runs", headers=h, json={"suite": "routines", "split": "heldout"}).status_code == 403
+
+
+def test_money_is_formatted_and_expired_cards_cannot_be_decided(biz, prepared):
+    with tx() as conn:
+        conn.execute("UPDATE approvals SET expires_at = now() - interval '1 hour' WHERE id = %s", (prepared["approval_id"],))
+    card = client.get(f"/api/approvals/{prepared['approval_id']}", headers=headers(biz, "APPROVER")).json()
+    assert card["expired"] is True and card["can_decide"] is False
+    assert client.get(f"/api/payments/{prepared['intent_id']}", headers=headers(biz, "VIEWER")).json()["amount"] == "£480.00"
+    assert client.get("/api/payments/nope", headers=headers(biz, "VIEWER")).status_code == 404
+
+
+def test_chat_goes_ahead_of_background_jobs(team):
+    from payoai.queue import enqueue
+
+    with tx() as conn:
+        enqueue(conn, "suggest_category", team["id"], {"n": 1})
+        enqueue(conn, "run_turn", team["id"], {"n": 2})
+    job = claim("t", ["suggest_category", "run_turn"])
+    assert job["kind"] == "run_turn"
+    finish(job["id"])
+    finish(claim("t", ["suggest_category"])["id"])
