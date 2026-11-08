@@ -93,8 +93,8 @@ function DraftMsg({ text }: { text: string }) {
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }} aria-busy="true">
       {AGENT_MARK}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flex: 1, maxWidth: 620, paddingTop: 3 }}>
-        <span className="wrap" style={{ fontSize: 15, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--muted)" }}>
-          {text.replace(/\*\*/g, "").replace(/\[\[(\w+):[^\]]*\]\]/g, "($1)")}<span style={{ display: "inline-block", width: 7, height: 15, marginLeft: 2, verticalAlign: "text-bottom", background: "var(--muted)", animation: "blink 1s infinite" }} />
+        <span className="wrap" style={{ fontSize: 17, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--muted)" }}>
+          {text.replace(/\*\*/g, "").replace(/\[\[(\w+):[^\]]*\]\]/g, "($1)")}<span style={{ display: "inline-block", width: 7, height: 17, marginLeft: 2, verticalAlign: "text-bottom", background: "var(--muted)", animation: "blink 1s infinite" }} />
         </span>
         <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><Icon name="fact_check" size={14} />Checking figures against the records…</span>
       </div>
@@ -114,7 +114,7 @@ function UserMsg({ m }: { m: Extract<Item, { t: "user" }> }) {
           </div>
         </div>
       ))}
-      {m.text && <div className="wrap" style={{ maxWidth: "85%", padding: "11px 16px", borderRadius: "20px 20px 6px 20px", background: "var(--primary-bg)", color: "var(--primary-fg)", fontSize: 15, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>}
+      {m.text && <div className="wrap" style={{ maxWidth: "85%", padding: "11px 16px", borderRadius: "20px 20px 6px 20px", background: "var(--primary-bg)", color: "var(--primary-fg)", fontSize: 17, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>}
       {m.sending && <span style={{ fontSize: 12, color: "var(--muted)" }}>Sending…</span>}
     </div>
   );
@@ -157,9 +157,9 @@ function AgentMsg({ parts }: { parts: Part[] }) {
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start", animation: "rise .2s" }}>
       {AGENT_MARK}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, flex: 1, maxWidth: 620, paddingTop: 3 }}>
-        {!lines.length && <span style={{ fontSize: 15, color: "var(--muted)" }}>This reply has no content to show.</span>}
+        {!lines.length && <span style={{ fontSize: 17, color: "var(--muted)" }}>This reply has no content to show.</span>}
         {lines.map((line, i) => (
-          <div key={i} style={{ display: "flex", gap: 8, fontSize: 15, lineHeight: 1.55, textWrap: "pretty" } as any}>
+          <div key={i} style={{ display: "flex", gap: 8, fontSize: 17, lineHeight: 1.55, textWrap: "pretty" } as any}>
             {line.li && <span style={{ flex: "none", width: 5, height: 5, borderRadius: "50%", background: "var(--text)", margin: "10px 4px 0 4px" }} />}
             <span className="wrap">{line.segs.map((s, j) => (s.kind === "chip" ? <Chip key={j} part={s.part} /> : <span key={j} style={{ fontWeight: s.bold ? 600 : 400 }}>{s.text}</span>))}</span>
           </div>
