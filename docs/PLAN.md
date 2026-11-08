@@ -153,7 +153,7 @@ Every business table has `team_id`. Money is stored as an integer in the asset's
 | Group | Tables |
 |---|---|
 | **Access** | `users`, `teams`, `memberships` (Viewer, Operator, Approver), `platform_roles` (Developer) |
-| **Conversation** | `chats`, `turns`, `task_list_items`, `chat_events` |
+| **Conversation** | `chats`, `turns`, `plans`, `plan_items`, `chat_events` (`task_list_items` is only read for old chats) |
 | **Routines** | `routine_runs`, `run_questions`, `start_confirmations`, and LangGraph's own checkpoint tables |
 | **Trace** | `trace_steps`, `audit_events` |
 | **Contacts** | `counterparties`, `payment_destinations`, `destination_verifications`, `contact_channels` |
@@ -210,14 +210,15 @@ A rejection is still allowed after expiry and during a pause. If an approval's r
 
 `agent/main_loop.py` is a plain loop of up to 10 steps, calling Argon with the client from `agent/llm.py`. It isn't a LangGraph graph, because Gemini's API stores the conversation with `previous_interaction_id`, so there is no conversation state to checkpoint. Every input and output is saved as a Trace Step.
 
-Code adds this chat's Waiting Runs, task list, Start Confirmation cards, recent runs and active Memory at the end of the latest input, labelled as data. Stable instructions stay at the start, so implicit caching works.
+Code adds this chat's Waiting Runs, the chat's plan, Start Confirmation cards, recent runs and active Memory at the end of the latest input, labelled as data. Stable instructions stay at the start, so implicit caching works.
 
 | Tool | Effect |
 |---|---|
 | Read Tools | Bills, payments, counterparties, balances, expenses, run details, compliance rules, and document text labelled as untrusted |
 | `start_routine(name, inputs)` | Starts a Routine, or returns a card if it needs a Start Confirmation. It returns when the Routine finishes or pauses. |
 | `answer_run(run_id, value)` | Answers a Waiting Run's question. The Routine rejects anything outside the allowed answers. |
-| `update_task_list(items)` | Saves the plan for multi-part requests. It gives no authority. |
+| `make_plan(title, items)` | Checks every item as `start_routine` would, then code runs them one per job. Start cards and approvals still need a person. |
+| `stop_plan(plan_id)` | Cancels the plan's items that haven't started. |
 
 The Main Loop has no tool for approval, verification, execution or changing check results. Team and role come from the session, never from tool inputs. Bank and wallet details are refused in every Routine's inputs except Add Counterparty, which saves them as `UNVERIFIED`, so they can't be paid.
 

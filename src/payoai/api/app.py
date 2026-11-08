@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Reques
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from payoai.agent import chips, read_tools
+from payoai.agent import chips, plans, read_tools
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.domain.money import format_minor
 from payoai.money import approval as approvals
@@ -201,8 +201,43 @@ def decide_confirmation(confirmation_id: str, decision: str, me: Member = Depend
         if decision == "confirm":
             if me.role not in get_routine(row["routine"]).roles:
                 raise HTTPException(403, "Your role can't start this Routine.")
-            enqueue(conn, "run_routine", me.team_id, {"routine": row["routine"], "inputs": row["inputs"], "actor": me.user_id, "chat_id": row["chat_id"], "turn_id": row["turn_id"], "confirmation_id": confirmation_id}, dedupe_key=f"confirm:{confirmation_id}")
+            enqueue(conn, "run_routine", me.team_id, plans.routine_job(row, me.user_id), dedupe_key=f"confirm:{confirmation_id}")
+    if row["plan_item_id"]:
+        plans.on_confirmation_decided(confirmation_id)
     return {"status": row["status"]}
+
+
+# Plans
+
+
+@app.get("/api/plans/{plan_id}")
+def plan(plan_id: str, me: Member = Depends(member)):
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT chat_id FROM plans WHERE id = %s AND team_id = %s", (plan_id, me.team_id))
+        if row is None:
+            raise HTTPException(404, "Plan not found.")
+        _own_chat(conn, me, row["chat_id"])
+    return plans.snapshot(plan_id, me.team_id)
+
+
+@app.post("/api/plans/{plan_id}/stop")
+def stop_plan(plan_id: str, me: Member = Depends(member)):
+    result = plans.stop(plan_id, me.team_id, me.user_id)
+    if result["status"] == "NOT_FOUND":
+        raise HTTPException(404, "Plan not found.")
+    return plans.snapshot(plan_id, me.team_id)
+
+
+@app.post("/api/plans/{plan_id}/confirm-all")
+def confirm_plan_cards(plan_id: str, me: Member = Depends(member)):
+    """One tap for every start card in this plan that is waiting on this person."""
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT chat_id FROM plans WHERE id = %s AND team_id = %s", (plan_id, me.team_id))
+        if row is None:
+            raise HTTPException(404, "Plan not found.")
+        _own_chat(conn, me, row["chat_id"])
+    started = plans.confirm_all(plan_id, me.team_id, me.user_id, me.role)
+    return {"started": len(started), "plan": plans.snapshot(plan_id, me.team_id)}
 
 
 # Documents and bills

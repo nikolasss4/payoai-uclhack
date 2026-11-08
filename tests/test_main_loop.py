@@ -143,9 +143,13 @@ def test_outage_gives_an_honest_message_and_saves_the_turn(biz):
     assert result["status"] == "FAILED" and "unavailable" in result["reply"]
 
 
-def test_multipart_requests_save_a_task_list(biz):
+def test_multipart_requests_make_a_plan_instead_of_a_task_list(biz):
     chat_id = new_id("chat")
-    script = Script(("update_task_list", {"items": [{"description": "Pay Alex", "status": "PENDING"}, {"description": "Check balance", "status": "PENDING"}]}), "Plan saved.")
+    items = [{"description": "Check cash", "routine": "cash_analysis", "inputs": {"days": 7}}, {"description": "Check cash again", "routine": "cash_analysis", "inputs": {"days": 14}}]
+    script = Script(("make_plan", {"title": "Two checks", "items": items}), "Planned.")
     turn_with(biz, script, chat_id=chat_id)
+    assert "PLANNED" in str(script.inputs[1])
+    names = {t["name"] for t in main_loop.tool_definitions()}
+    assert "make_plan" in names and "update_task_list" not in names
     with tx() as conn:
-        assert [r["description"] for r in fetch_all(conn, "SELECT description FROM task_list_items WHERE chat_id = %s ORDER BY position", (chat_id,))] == ["Pay Alex", "Check balance"]
+        assert [r["description"] for r in fetch_all(conn, "SELECT i.description FROM plan_items i JOIN plans p ON p.id = i.plan_id WHERE p.chat_id = %s ORDER BY i.position", (chat_id,))] == ["Check cash", "Check cash again"]

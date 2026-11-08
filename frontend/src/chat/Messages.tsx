@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useApp } from "../app/context";
 import { useAction, useLive } from "../hooks";
 import { badge, decisionBadge, fileIcon, hm, label, plural } from "../lib";
 import { Badge, ErrorLine, Icon } from "../ui";
-import type { ChatEvent, Item, Part } from "./useChat";
+import { api } from "../api";
+import type { ChatEvent, Item, Part, PlanSnapshot, PlanStep } from "./useChat";
 
 const AGENT_MARK = (
   <span aria-hidden="true" style={{ width: 28, height: 28, borderRadius: 8, background: "var(--accent)", color: "#0B0B0C", display: "grid", placeItems: "center", flex: "none", fontWeight: 700, fontSize: 14 }}>P</span>
@@ -23,6 +24,7 @@ export function Messages({ items, typing, onAnswer, onDecideStart }: {
           case "agent": return <AgentMsg key={m.key} parts={m.parts} />;
           case "steps": return <StepsCard key={m.key} m={m} />;
           case "tasks": return <TasksCard key={m.key} tasks={m.tasks} />;
+          case "plan": return <PlanCard key={m.key} m={m} />;
           case "start": return <StartCard key={m.key} ev={m.ev} onDecide={onDecideStart} />;
           case "question": return <QuestionCard key={m.key} m={m} onAnswer={onAnswer} />;
           case "approval": return <ApprovalChatCard key={m.key} id={m.approvalId} />;
@@ -245,6 +247,96 @@ function TasksCard({ tasks }: { tasks: { description: string; status: string }[]
           <span style={{ textDecoration: t.status === "CANCELLED" ? "line-through" : undefined }}>{t.description}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+type Tone = "ok" | "info" | "warn" | "danger" | "muted";
+const STEP_LOOK: Record<string, [string, Tone, string]> = {
+  PENDING: ["radio_button_unchecked", "muted", "Not started yet"],
+  RUNNING: ["progress_activity", "info", "Running"],
+  NEEDS_START: ["touch_app", "warn", "Tap its card to start"],
+  NEEDS_ANSWER: ["help", "warn", "Needs your answer"],
+  NEEDS_APPROVAL: ["approval", "warn", "Waiting for approval"],
+  NEEDS_DOCUMENT: ["description", "warn", "Needs a document"],
+  DONE: ["check_circle", "ok", "Done"],
+  FAILED: ["error", "danger", "Failed"],
+  BLOCKED: ["block", "danger", "Not started"],
+  CANCELLED: ["cancel", "muted", "Cancelled"],
+  DECLINED: ["do_not_disturb_on", "muted", "Not started"],
+};
+const toneColor = (t: Tone) => (t === "muted" ? "var(--muted)" : `var(--${t})`);
+
+function stepLook(s: PlanStep): [string, Tone, string] {
+  if (s.state === "DONE" && s.decision === "BLOCK") return ["block", "danger", "Blocked by checks"];
+  if (s.state === "DONE" && s.decision && s.decision !== "ELIGIBLE_FOR_APPROVAL") return ["info", "warn", label(s.decision)];
+  if (s.state === "PENDING" && s.waiting_on.length) return ["schedule", "muted", `After step ${s.waiting_on.join(", ")}`];
+  if (s.state === "NEEDS_APPROVAL" && s.payment_status && s.payment_status !== "READY_FOR_APPROVAL") return ["payments", "info", label(s.payment_status)];
+  return STEP_LOOK[s.state] || ["circle", "muted", label(s.state)];
+}
+
+/** One card per plan, updated in place. It re-reads the plan, because approvals change it without a plan event. */
+function PlanCard({ m }: { m: Extract<Item, { t: "plan" }> }) {
+  const { canWrite, open } = useApp();
+  const act = useAction();
+  const unsettled = (p: PlanSnapshot) => p.status === "RUNNING" || p.items.some((i) => ["RUNNING", "NEEDS_START", "NEEDS_ANSWER", "NEEDS_APPROVAL", "NEEDS_DOCUMENT"].includes(i.state));
+  const live = useLive<PlanSnapshot>(`/api/plans/${m.planId}`, unsettled(m.plan) ? 10000 : 0);
+  const { reload } = live;
+  useEffect(() => { reload(); }, [m.version, reload]);
+  // The fetched copy is current; the event's copy shows until it arrives.
+  const plan = live.data && live.data.updated_at >= m.plan.updated_at ? live.data : m.plan;
+  const c = plan.counts;
+  const toStart = plan.items.filter((i) => i.state === "NEEDS_START").length;
+  const running = plan.status === "RUNNING";
+  const post = (path: string) => act.run(async () => { await api(`/api/plans/${plan.id}/${path}`, { method: "POST", body: {} }); await reload(); });
+  const status = running ? `${c.settled} of ${c.total} started` : plan.status === "STOPPED" ? "Stopped" : "Every step started";
+  return (
+    <div style={{ ...cardBase, borderRadius: 16, border: "1px solid var(--border-strong)", maxWidth: 580, padding: "14px 16px", gap: 10, boxShadow: "var(--shadow-1)" }} aria-label={`Plan: ${plan.title}`}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span className="kicker" style={{ fontSize: 11.5 }}>Plan</span>
+        <span style={{ fontSize: 15.5, fontWeight: 600, flex: 1, minWidth: 0 }} className="wrap">{plan.title}</span>
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }} role="status">{status}</span>
+      </div>
+      <div aria-hidden="true" style={{ height: 4, borderRadius: 4, background: "var(--raised)", overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${c.total ? (100 * c.settled) / c.total : 0}%`, background: running ? "var(--info)" : "var(--ok)", transition: "width .3s" }} />
+      </div>
+      <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column" }}>
+        {plan.items.map((s) => {
+          const [icon, tone, text] = stepLook(s);
+          const record = s.payment_id ? { kind: "payment", id: s.payment_id } : s.bill_id ? { kind: "bill", id: s.bill_id } : null;
+          return (
+            <li key={s.step} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "7px 0", borderTop: "1px solid var(--border)", fontSize: 13.5 }}>
+              <span className="num" style={{ width: 18, flex: "none", color: "var(--muted)", fontSize: 12.5, paddingTop: 1 }}>{s.step}</span>
+              <Icon name={icon} size={17} className={s.state === "RUNNING" ? "spin" : ""} style={{ color: toneColor(tone), flex: "none", marginTop: 1 }} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
+                <span className="wrap" style={{ textDecoration: s.state === "CANCELLED" ? "line-through" : undefined }}>{s.description}</span>
+                <span className="wrap" style={{ fontSize: 12.5, color: toneColor(tone) }}>{text}{s.note ? <span style={{ color: "var(--muted)" }}> · {s.note}</span> : null}</span>
+              </div>
+              {record && (
+                <button type="button" className="btn-pill" onClick={() => open(record)} style={{ minHeight: 32, padding: "0 10px", fontSize: 12.5, flex: "none" }}>
+                  {record.kind === "payment" ? "Payment" : "Bill"}
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      {canWrite && (running || toStart > 0) && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {toStart > 0 && (
+            <button type="button" className="btn-pill btn-primary" disabled={act.busy} onClick={() => post("confirm-all")} style={{ minHeight: 40, fontSize: 13.5 }}>
+              Start {toStart === 1 ? "the waiting step" : `all ${toStart} waiting steps`}
+            </button>
+          )}
+          {running && (
+            <button type="button" className="btn-pill" disabled={act.busy} onClick={() => post("stop")} style={{ minHeight: 40, fontSize: 13.5 }}>
+              <Icon name="stop_circle" size={18} />Stop plan
+            </button>
+          )}
+          {toStart > 0 && <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Starting a step is not approving a payment.</span>}
+        </div>
+      )}
+      <ErrorLine error={act.error || live.error} />
     </div>
   );
 }

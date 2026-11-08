@@ -28,22 +28,33 @@ def enqueue(
     return row is not None
 
 
+# Jobs that act in a chat. Only one of them runs per chat at a time, so a person's messages, a
+# plan's steps and a tapped start card happen one after another, never at once.
+CHAT_KINDS = ["run_turn", "run_routine", "advance_plan"]
+
+
 def claim(worker: str, kinds: list[str]) -> dict | None:
     with tx() as conn:
+        # Claims are taken one at a time, so two workers can't each claim a job of the same chat.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('payoai.claim'))")
         return fetch_one(
             conn,
             """
-            UPDATE jobs SET status = 'CLAIMED', locked_by = %s, locked_at = now(), attempts = attempts + 1
+            UPDATE jobs SET status = 'CLAIMED', locked_by = %(worker)s, locked_at = now(), attempts = attempts + 1
             WHERE id = (
                 SELECT id FROM jobs
-                WHERE status = 'QUEUED' AND kind = ANY(%s) AND run_at <= now()
-                ORDER BY (kind = 'run_turn') DESC, run_at
+                WHERE status = 'QUEUED' AND kind = ANY(%(kinds)s) AND run_at <= now()
+                  AND NOT (kind = ANY(%(chat_kinds)s) AND payload ? 'chat_id' AND EXISTS (
+                    SELECT 1 FROM jobs busy
+                    WHERE busy.status = 'CLAIMED' AND busy.kind = ANY(%(chat_kinds)s) AND busy.payload->>'chat_id' = jobs.payload->>'chat_id'))
+                -- A person's message and tap come before a plan's next step, so they're answered between steps.
+                ORDER BY (kind IN ('run_turn', 'run_routine')) DESC, run_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
             RETURNING *
             """,
-            (worker, kinds),
+            {"worker": worker, "kinds": kinds, "chat_kinds": CHAT_KINDS},
         )
 
 

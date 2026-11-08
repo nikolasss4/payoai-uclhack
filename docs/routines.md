@@ -4,7 +4,7 @@ Decisions from the design grilling, updated to match the code at commit `d94d88b
 
 ## Main Loop
 
-The Main Loop answers free-form questions using Read Tools and starts Routines one at a time. It is a plain loop rather than a LangGraph graph, because Gemini's API stores the conversation (see the note in ADR 0001). It picks up Waiting Runs itself and offers to continue them. It keeps a saved task list for multi-part requests, which gives no authority. There is no separate planner LLM.
+The Main Loop answers free-form questions using Read Tools and starts Routines one at a time. It is a plain loop rather than a LangGraph graph, because Gemini's API stores the conversation (see the note in ADR 0001). It picks up Waiting Runs itself and offers to continue them. For a request that needs several runs, such as several bills, it makes a Plan once (`make_plan`): every item is checked as `start_routine` would check it, then code runs the items one per `advance_plan` job, so the model's step budget doesn't apply. Items that pause for a person don't hold the plan up, `depends_on` items wait for earlier ones to go through, and the queue runs only one job per chat at a time, so messages are answered between steps. The chat shows the plan as one card that updates live. There is no separate planner LLM.
 
 Read Tools return typed records with IDs, covering bills and obligations, payments and attempts, counterparties and destinations, balances and alerts, expenses, run and decision details, compliance rules, and document contents labelled as untrusted.
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ACCEPT, api, upload } from "../api";
 import { rememberChat, rememberedChat, useApp } from "../app/context";
 import { Messages } from "../chat/Messages";
@@ -6,6 +6,7 @@ import { useChat, type ChatRow, type Outgoing } from "../chat/useChat";
 import { useDismiss, useLive } from "../hooks";
 import { dayLabel, fileIcon, fileKind, fileSize } from "../lib";
 import { ErrorLine, Icon } from "../ui";
+import type { PlanSnapshot } from "../chat/useChat";
 import { MemoryList, useMemories } from "./Memory";
 
 const PROMPTS = ["Pay this bill", "Can we cover next week's bills?", "Which expenses are missing receipts?", "Why was this payment blocked?"];
@@ -108,7 +109,8 @@ export function ChatScreen() {
   );
   const composer = (
     <Composer mobile={mobile} draft={draft} setDraft={setDraft} attachment={attachment} clearAttachment={() => setAttachment(null)}
-      canAttach={canWrite} onAttach={pickFile} onSend={() => send()} error={sendError} />
+      canAttach={canWrite} onAttach={pickFile} onSend={() => send()} error={sendError}
+      strip={chat.runningPlan ? <PlanStrip plan={chat.runningPlan.plan} canStop={canWrite} mobile={mobile} /> : null} />
   );
   const input = <input ref={fileInput} type="file" accept={ACCEPT} hidden aria-hidden="true" tabIndex={-1} onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />;
 
@@ -251,9 +253,31 @@ function MobileChatBar({ title, chats, active, onPick, onNew, onMemory }: { titl
   );
 }
 
-function Composer({ mobile, draft, setDraft, attachment, clearAttachment, canAttach, onAttach, onSend, error }: {
+/** Keeps a running plan in view after its card has scrolled away. */
+function PlanStrip({ plan, canStop, mobile }: { plan: PlanSnapshot; canStop: boolean; mobile: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const c = plan.counts;
+  const stop = async () => {
+    setBusy(true);
+    setError(null);
+    try { await api(`/api/plans/${plan.id}/stop`, { method: "POST", body: {} }); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  return (
+    <div role="status" style={{ display: "flex", alignItems: "center", gap: 10, padding: mobile ? "6px 6px 6px 12px" : "6px 6px 6px 14px", borderRadius: 14, background: "var(--raised)", fontSize: 13.5 }}>
+      <Icon name="progress_activity" size={17} className="spin" style={{ color: "var(--info)", flex: "none" }} />
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+        <span style={{ fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{plan.title} · {c.settled} of {c.total} started</span>
+        <span style={{ fontSize: 12, color: error ? "var(--danger)" : "var(--muted)" }}>{error || "Messages you send now are answered between steps."}</span>
+      </div>
+      {canStop && <button type="button" className="btn-pill" disabled={busy} onClick={stop} style={{ minHeight: 36, padding: "0 12px", fontSize: 13, flex: "none" }}>Stop</button>}
+    </div>
+  );
+}
+
+function Composer({ mobile, draft, setDraft, attachment, clearAttachment, canAttach, onAttach, onSend, error, strip }: {
   mobile: boolean; draft: string; setDraft: (s: string) => void; attachment: Attachment | null; clearAttachment: () => void;
-  canAttach: boolean; onAttach: () => void; onSend: () => void; error: string | null;
+  canAttach: boolean; onAttach: () => void; onSend: () => void; error: string | null; strip?: ReactNode;
 }) {
   const ready = !!(draft.trim() || (attachment && attachment.id)) && !attachment?.uploading;
   const sendStyle = { background: ready ? "var(--primary-bg)" : "var(--raised)", color: ready ? "var(--primary-fg)" : "var(--subtle)" };
@@ -287,6 +311,7 @@ function Composer({ mobile, draft, setDraft, attachment, clearAttachment, canAtt
     <div style={{ flex: "none", padding: mobile ? "8px 10px 10px" : "0 24px 18px" }}>
       <div style={{ maxWidth: mobile ? undefined : 780, margin: "0 auto", display: "flex", flexDirection: "column", gap: mobile ? 6 : 8 }}>
         <ErrorLine error={error} />
+        {strip}
         {box}
       </div>
     </div>

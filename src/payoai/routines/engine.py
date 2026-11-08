@@ -26,6 +26,10 @@ class NotAllowed(Exception):
     pass
 
 
+class AlreadyStarted(Exception):
+    """This plan item already has its run, so a retried job doesn't start a second one."""
+
+
 class InvalidAnswer(Exception):
     pass
 
@@ -61,7 +65,7 @@ def role_of(conn, team_id: str, user_id: str) -> str | None:
     return row["role"] if row else None
 
 
-def create_run(routine: str, team_id: str, inputs: dict, trigger_type: str, actor: str | None = None, chat_id: str | None = None, turn_id: str | None = None) -> str:
+def create_run(routine: str, team_id: str, inputs: dict, trigger_type: str, actor: str | None = None, chat_id: str | None = None, turn_id: str | None = None, plan_item_id: str | None = None) -> str:
     """Registers the run straight away, with its inputs and trigger. This commits no money."""
     config = get_routine(routine)
     run_id = new_id("run")
@@ -72,12 +76,14 @@ def create_run(routine: str, team_id: str, inputs: dict, trigger_type: str, acto
         with tx() as conn:
             conn.execute(
                 """
-                INSERT INTO routine_runs (id, team_id, routine, routine_version, chat_id, started_turn_id, trigger_type, triggered_by, inputs, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'RUNNING')
+                INSERT INTO routine_runs (id, team_id, routine, routine_version, chat_id, started_turn_id, trigger_type, triggered_by, inputs, status, plan_item_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'RUNNING', %s)
                 """,
-                (run_id, team_id, routine, config.version, chat_id, turn_id, trigger_type, actor, Jsonb(inputs)),
+                (run_id, team_id, routine, config.version, chat_id, turn_id, trigger_type, actor, Jsonb(inputs), plan_item_id),
             )
     except UniqueViolation as exc:
+        if exc.diag.constraint_name == "routine_runs_plan_item":
+            raise AlreadyStarted("This plan item already has a run.") from exc
         raise RoutineBusy("Another step is still running in this chat.") from exc
     return run_id
 
@@ -97,8 +103,8 @@ def run(run_id: str) -> dict:
     return _drive(row, state)
 
 
-def start(routine: str, team_id: str, inputs: dict, trigger_type: str, actor: str | None = None, chat_id: str | None = None, turn_id: str | None = None) -> dict:
-    return run(create_run(routine, team_id, inputs, trigger_type, actor, chat_id, turn_id))
+def start(routine: str, team_id: str, inputs: dict, trigger_type: str, actor: str | None = None, chat_id: str | None = None, turn_id: str | None = None, plan_item_id: str | None = None) -> dict:
+    return run(create_run(routine, team_id, inputs, trigger_type, actor, chat_id, turn_id, plan_item_id))
 
 
 def answer(run_id: str, team_id: str, value, turn_id: str | None = None) -> dict:
@@ -121,6 +127,15 @@ def answer(run_id: str, team_id: str, value, turn_id: str | None = None) -> dict
 
 
 def _drive(row: dict, payload) -> dict:
+    outcome = _drive_graph(row, payload)
+    if row.get("plan_item_id"):
+        from payoai.agent import plans  # Imported here, because plans starts runs through this module.
+
+        plans.on_run_changed(row["plan_item_id"])
+    return outcome
+
+
+def _drive_graph(row: dict, payload) -> dict:
     run_id, team_id = row["id"], row["team_id"]
     graph = _graph(row["routine"])
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}

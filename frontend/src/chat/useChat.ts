@@ -11,11 +11,21 @@ export interface ChatEvent {
 export interface Turn { id: string; seq: number; text: string; status: string; at: string; document?: { id: string; filename: string; media_type: string } | null }
 export interface ChatRow { id: string; title: string | null; created_at: string; last_at: string }
 
+export interface PlanStep {
+  step: number; description: string; routine: string; routine_name: string; state: string; decision: string | null; note: string | null;
+  depends_on: number[]; waiting_on: number[]; run_id: string | null; confirmation_id: string | null; bill_id: string | null; payment_id: string | null; payment_status: string | null;
+}
+export interface PlanSnapshot {
+  id: string; title: string; status: "RUNNING" | "FINISHED" | "STOPPED"; turn_id: string; items: PlanStep[]; updated_at: string;
+  counts: { total: number; went_through: number; needs_you: number; didnt_go_through: number; not_started: number; settled: number };
+}
+
 export type Item =
   | { t: "user"; key: string; text: string; file?: { name: string; meta: string; media?: string } | null; sending?: boolean }
   | { t: "agent"; key: string; parts: Part[] }
   | { t: "steps"; key: string; runId: string | null; rows: string[]; running: boolean; finished?: any; flagged?: ChatEvent["flagged"]; at: string }
   | { t: "tasks"; key: string; tasks: { description: string; status: string }[] }
+  | { t: "plan"; key: string; planId: string; plan: PlanSnapshot; version: number }
   | { t: "start"; key: string; ev: ChatEvent }
   | { t: "question"; key: string; ev: ChatEvent; answered: boolean; answer: string | null }
   | { t: "approval"; key: string; approvalId: string }
@@ -135,7 +145,12 @@ export function useChat(chatId: string | null) {
   }, []);
 
   const items = useMemo(() => buildTimeline(turns, events, decided, sending, typing), [turns, events, decided, sending, typing]);
-  return { items, typing, loading, error, send, decideStart, empty: !loading && !turns.length && !events.length && !sending };
+  // The running plan, from its newest event. The card itself re-reads the plan, so this is only for the strip.
+  const runningPlan = useMemo(() => {
+    const plans = items.filter((i): i is Extract<Item, { t: "plan" }> => i.t === "plan");
+    return plans.reverse().find((p) => p.plan.status === "RUNNING") || null;
+  }, [items]);
+  return { items, typing, loading, error, send, decideStart, runningPlan, empty: !loading && !turns.length && !events.length && !sending };
 }
 
 function answered(events: ChatEvent[]) {
@@ -154,6 +169,16 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
   const done = answered(events);
   const drafts = new Map<string, string>();
   const lastSteps = new Map<string, Extract<Item, { t: "steps" }>>();
+  // A plan is one card where it was made. Later events update that card instead of adding copies.
+  const planCards = new Map<string, Extract<Item, { t: "plan" }>>();
+  // "Start all" on a plan decides its start cards, and the newest plan event says which.
+  const decidedByPlan = new Map<string, string>();
+  for (const e of events) {
+    if (e.kind !== "PLAN") continue;
+    for (const step of (e.payload?.items || []) as PlanStep[]) {
+      if (step.confirmation_id && step.state !== "NEEDS_START") decidedByPlan.set(step.confirmation_id, step.state === "DECLINED" ? "DECLINED" : "CONFIRMED");
+    }
+  }
   for (const entry of entries) {
     if (entry.turn) {
       const t = entry.turn;
@@ -171,6 +196,18 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
         prev.endedAt = e.at;
       } else {
         out.push({ t: "thinking", key: `th-${e.id}`, turnId: e.turn_id, lines: [{ text: p.text || "", source: p.source || "step" }], live: false, startedAt: e.at, endedAt: e.at });
+      }
+      continue;
+    }
+    if (e.kind === "PLAN" && p.id) {
+      const card = planCards.get(p.id);
+      if (card) {
+        card.plan = p;
+        card.version = e.id;
+      } else {
+        const item: Extract<Item, { t: "plan" }> = { t: "plan", key: `p-${p.id}`, planId: p.id, plan: p, version: e.id };
+        planCards.set(p.id, item);
+        out.push(item);
       }
       continue;
     }
@@ -200,7 +237,8 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
     } else if (e.kind === "QUESTION") {
       out.push({ t: "question", key: `q-${e.id}`, ev: e, answered: e.question_status === "ANSWERED" || e.question_status === "EXPIRED", answer: e.answer_label ?? null });
     } else if (e.kind === "START_CARD") {
-      const status = decided[p.confirmation_id] || e.confirmation_status;
+      const pending = !e.confirmation_status || e.confirmation_status === "PENDING";
+      const status = decided[p.confirmation_id] || (pending && decidedByPlan.get(p.confirmation_id)) || e.confirmation_status;
       out.push({ t: "start", key: `c-${e.id}`, ev: { ...e, confirmation_status: status } });
     } else if (e.kind === "APPROVAL_CARD" && p.approval_id) {
       out.push({ t: "approval", key: `a-${e.id}`, approvalId: p.approval_id });
