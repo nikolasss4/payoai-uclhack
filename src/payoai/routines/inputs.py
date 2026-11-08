@@ -113,6 +113,18 @@ class ResearchInput(Strict):
     delivery_by: str | None = None
 
 
+class WebResearchInput(Strict):
+    request: str
+
+    @field_validator("request")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Say what to research.")
+        return value[:2000]
+
+
 class CheckoutInput(Strict):
     merchant: str
     sku: str
@@ -139,6 +151,7 @@ SCHEMAS = {
     "set_up_recurring": RecurringInput,
     "revise_expense": ReviseExpenseInput,
     "chase_missing_document": ChaseInput,
+    "web_research": WebResearchInput,
     "purchase_research": ResearchInput,
     "purchase_checkout": CheckoutInput,
     "save_preference": SavePreferenceInput,

@@ -194,8 +194,9 @@ function StepsCard({ m }: { m: Extract<Item, { t: "steps" }> }) {
   const flagged = m.flagged || [];
   const f = m.finished;
   const decision = f?.decision ? decisionBadge(f.decision) : f?.status ? badge(f.status) : null;
+  const researching = m.rows[0] === "Web Research";
   const summary = m.running
-    ? `Running checks · step ${m.rows.length}`
+    ? researching ? (m.rows.length > 1 ? `Searching the web · ${m.rows[m.rows.length - 1]}` : "Searching the web") : `Running checks · step ${m.rows.length}`
     : [f?.routine ? label(f.routine) : null, m.rows.length ? plural(m.rows.length, "step") : null, flagged.length ? `${flagged.length} flagged` : f?.decision === "ELIGIBLE_FOR_APPROVAL" ? "all passed" : null, !f ? "paused" : null].filter(Boolean).join(" · ");
   return (
     <div style={{ ...cardBase, borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 560 }}>
