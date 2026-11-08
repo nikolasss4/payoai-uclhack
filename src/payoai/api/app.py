@@ -112,9 +112,13 @@ def demo_users():
 # Chat
 
 
+MAX_TURN_DOCUMENTS = 10
+
+
 class NewTurn(BaseModel):
     text: str
     document_id: str | None = None
+    document_ids: list[str] = []
 
 
 @app.post("/api/chats")
@@ -181,14 +185,18 @@ def _own_chat(conn, me: Member, chat_id: str) -> dict:
 
 @app.post("/api/chats/{chat_id}/turns")
 def send_turn(chat_id: str, body: NewTurn, me: Member = Depends(member)):
-    text = body.text
-    if body.document_id:
-        text += f"\n[The user attached document_id {body.document_id}]"
+    # One marker line per document, in the order they were attached. Readers split the user's own words off at the first one.
+    document_ids = list(dict.fromkeys(([body.document_id] if body.document_id else []) + body.document_ids))
+    if len(document_ids) > MAX_TURN_DOCUMENTS:
+        raise HTTPException(422, f"Attach at most {MAX_TURN_DOCUMENTS} documents to one message.")
+    text = body.text + "".join(f"\n[The user attached document_id {d}]" for d in document_ids)
     turn_id = new_id("turn")
     with tx() as conn:
         chat = _own_chat(conn, me, chat_id)
-        if body.document_id and not fetch_one(conn, "SELECT id FROM documents WHERE id = %s AND team_id = %s", (body.document_id, me.team_id)):
-            raise HTTPException(404, "Document not found.")
+        if document_ids:
+            found = fetch_all(conn, "SELECT id FROM documents WHERE id = ANY(%s) AND team_id = %s", (document_ids, me.team_id))
+            if len(found) != len(document_ids):
+                raise HTTPException(404, "Document not found.")
         seq = fetch_one(conn, "SELECT COALESCE(max(seq), -1) + 1 AS n FROM turns WHERE chat_id = %s", (chat_id,))["n"]
         conn.execute("INSERT INTO turns (id, chat_id, team_id, seq, user_input) VALUES (%s, %s, %s, %s, %s)", (turn_id, chat_id, me.team_id, seq, text))
         if chat["title"] is None:

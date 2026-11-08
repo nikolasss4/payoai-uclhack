@@ -8,11 +8,11 @@ export interface ChatEvent {
   confirmation_status?: string | null; requested_by?: string | null; inputs_display?: [string, string][];
   question_status?: string; answer_label?: string | null; flagged?: { check_name: string; outcome: string; reason: string }[];
 }
-export interface Turn { id: string; seq: number; text: string; status: string; at: string; document?: { id: string; filename: string; media_type: string } | null }
+export interface Turn { id: string; seq: number; text: string; status: string; at: string; documents?: { id: string; filename: string; media_type: string }[] }
 export interface ChatRow { id: string; title: string | null; created_at: string; last_at: string; last_message: string | null; last_from: "user" | "agent" | null }
 
 export type Item =
-  | { t: "user"; key: string; text: string; file?: { name: string; meta: string; media?: string } | null; sending?: boolean }
+  | { t: "user"; key: string; text: string; files: FileChip[]; sending?: boolean }
   | { t: "agent"; key: string; parts: Part[] }
   | { t: "steps"; key: string; runId: string | null; rows: string[]; running: boolean; finished?: any; flagged?: ChatEvent["flagged"]; at: string }
   | { t: "tasks"; key: string; tasks: { description: string; status: string }[] }
@@ -23,7 +23,8 @@ export type Item =
   | { t: "thinking"; key: string; turnId: string; lines: { text: string; source: string }[]; live: boolean; startedAt: string; endedAt: string }
   | { t: "draft"; key: string; text: string };
 
-export interface Outgoing { text: string; shown: string; documentId?: string | null; file?: { name: string; meta: string; media?: string } | null }
+export interface FileChip { name: string; meta: string; media?: string }
+export interface Outgoing { text: string; shown: string; documentIds: string[]; files: FileChip[] }
 
 /** Reads a chat from its start, then follows new events. Cards re-read their records, so nothing shown is stale. */
 export function useChat(chatId: string | null) {
@@ -120,7 +121,7 @@ export function useChat(chatId: string | null) {
   const send = useCallback(async (id: string, out: Outgoing) => {
     setSending(out);
     try {
-      await api(`/api/chats/${id}/turns`, { method: "POST", body: { text: out.text, document_id: out.documentId || null } });
+      await api(`/api/chats/${id}/turns`, { method: "POST", body: { text: out.text, document_ids: out.documentIds } });
       await loadTurns(id);
     } finally {
       setSending(null);
@@ -157,8 +158,8 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
   for (const entry of entries) {
     if (entry.turn) {
       const t = entry.turn;
-      const doc = t.document;
-      out.push({ t: "user", key: `t-${t.id}`, text: t.text, file: doc ? { name: doc.filename, meta: kindOf(doc.media_type), media: doc.media_type } : null });
+      const files = (t.documents || []).map((d) => ({ name: d.filename, meta: kindOf(d.media_type), media: d.media_type }));
+      out.push({ t: "user", key: `t-${t.id}`, text: t.text, files });
       continue;
     }
     const e = entry.ev as ChatEvent;
@@ -233,7 +234,7 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
   for (const [turnId, text] of drafts) {
     if (!done.has(turnId) && text.trim()) out.push({ t: "draft", key: `d-${turnId}`, text });
   }
-  if (sending) out.push({ t: "user", key: "sending", text: sending.shown, file: sending.file, sending: true });
+  if (sending) out.push({ t: "user", key: "sending", text: sending.shown, files: sending.files, sending: true });
   return out;
 }
 

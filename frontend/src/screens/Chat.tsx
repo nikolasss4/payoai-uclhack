@@ -10,7 +10,11 @@ import { MemoryList, useMemories } from "./Memory";
 
 const PROMPTS = ["Pay this bill", "Can we cover next week's bills?", "Which expenses are missing receipts?", "Why was this payment blocked?"];
 
-interface Attachment { name: string; size: number; media: string; id?: string; uploading: boolean; error?: string }
+interface Attachment { key: number; name: string; size: number; media: string; id?: string; uploading: boolean; error?: string }
+
+// Matches the API's limit on documents in one message.
+const MAX_ATTACHMENTS = 10;
+let nextAttachmentKey = 0;
 
 export function ChatScreen() {
   const app = useApp();
@@ -20,7 +24,7 @@ export function ChatScreen() {
   const setActive = useCallback((id: string | null) => { setActiveState(id); rememberChat(session, id); }, [session]);
   const chat = useChat(active);
   const [draft, setDraft] = useState("");
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [memOpen, setMemOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -32,29 +36,33 @@ export function ChatScreen() {
 
   const pickFile = useCallback(() => fileInput.current?.click(), []);
 
-  const onFile = async (file: File | undefined) => {
-    if (!file) return;
-    const base: Attachment = { name: file.name, size: file.size, media: file.type, uploading: true };
-    setAttachment(base);
-    try {
-      const doc = await upload(file);
-      setAttachment({ ...base, id: doc.id, uploading: false });
-    } catch (e) {
-      setAttachment({ ...base, uploading: false, error: (e as Error).message });
-    }
+  // Each file uploads on its own, so one bad file doesn't hold up the rest.
+  const onFiles = (list: FileList | null) => {
+    const files = Array.from(list || []).slice(0, Math.max(0, MAX_ATTACHMENTS - attachments.length));
+    if (!files.length) return;
+    const added: Attachment[] = files.map((file) => ({ key: nextAttachmentKey++, name: file.name, size: file.size, media: file.type, uploading: true }));
+    const update = (key: number, change: Partial<Attachment>) => setAttachments((all) => all.map((a) => (a.key === key ? { ...a, ...change } : a)));
+    setAttachments((all) => [...all, ...added]);
+    files.forEach((file, i) => {
+      upload(file).then(
+        (doc) => update(added[i].key, { id: doc.id, uploading: false }),
+        (e) => update(added[i].key, { uploading: false, error: (e as Error).message }),
+      );
+    });
   };
 
   const send = useCallback(async (textArg?: string, shownArg?: string, forceNew = false) => {
     const text = (textArg ?? draft).trim();
-    const att = textArg === undefined ? attachment : null;
-    if (!text && !att) return;
-    if (att && (att.uploading || !att.id)) return;
+    const atts = textArg === undefined ? attachments : [];
+    if (atts.some((a) => a.uploading)) return;
+    const ready = atts.filter((a) => a.id);
+    if (!text && !ready.length) return;
     setSendError(null);
     const out: Outgoing = {
-      text: text || "Here's a document.", shown: shownArg ?? text,
-      documentId: att?.id || null, file: att ? { name: att.name, meta: `${fileKind(att.name, att.media)} · ${fileSize(att.size)}`, media: att.media } : null,
+      text: text || (ready.length > 1 ? `Here are ${ready.length} documents.` : "Here's a document."), shown: shownArg ?? text,
+      documentIds: ready.map((a) => a.id as string), files: ready.map((a) => ({ name: a.name, meta: `${fileKind(a.name, a.media)} · ${fileSize(a.size)}`, media: a.media })),
     };
-    if (textArg === undefined) { setDraft(""); setAttachment(null); }
+    if (textArg === undefined) { setDraft(""); setAttachments([]); }
     try {
       let id = forceNew ? null : active;
       const created = !id;
@@ -64,9 +72,9 @@ export function ChatScreen() {
       chats.reload();
     } catch (e) {
       setSendError((e as Error).message);
-      if (textArg === undefined) { setDraft(text); setAttachment(att); }
+      if (textArg === undefined) { setDraft(text); setAttachments(atts); }
     }
-  }, [draft, attachment, active, chat, setActive, chats]);
+  }, [draft, attachments, active, chat, setActive, chats]);
 
   // Requests from other screens: "Upload a bill", "Pay this contact".
   const handled = useRef(0);
@@ -92,7 +100,7 @@ export function ChatScreen() {
     if (el) nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 240;
   };
 
-  const newChat = () => { setActive(null); setDraft(""); setAttachment(null); };
+  const newChat = () => { setActive(null); setDraft(""); setAttachments([]); };
   const prompt = (t: string) => {
     if (t === "Pay this bill" && canWrite) { setDraft(t); pickFile(); } else send(t);
   };
@@ -107,10 +115,10 @@ export function ChatScreen() {
     </>
   );
   const composer = (
-    <Composer mobile={mobile} draft={draft} setDraft={setDraft} attachment={attachment} clearAttachment={() => setAttachment(null)}
-      canAttach={canWrite} onAttach={pickFile} onSend={() => send()} error={sendError} />
+    <Composer mobile={mobile} draft={draft} setDraft={setDraft} attachments={attachments} removeAttachment={(key) => setAttachments((all) => all.filter((a) => a.key !== key))}
+      canAttach={canWrite && attachments.length < MAX_ATTACHMENTS} onAttach={pickFile} onSend={() => send()} error={sendError} />
   );
-  const input = <input ref={fileInput} type="file" accept={ACCEPT} hidden aria-hidden="true" tabIndex={-1} onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />;
+  const input = <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden aria-hidden="true" tabIndex={-1} onChange={(e) => { onFiles(e.target.files); e.target.value = ""; }} />;
 
   if (mobile) {
     return (
@@ -261,23 +269,27 @@ function MobileChatBar({ title, chats, active, onPick, onNew, onMemory }: { titl
   );
 }
 
-function Composer({ mobile, draft, setDraft, attachment, clearAttachment, canAttach, onAttach, onSend, error }: {
-  mobile: boolean; draft: string; setDraft: (s: string) => void; attachment: Attachment | null; clearAttachment: () => void;
+function Composer({ mobile, draft, setDraft, attachments, removeAttachment, canAttach, onAttach, onSend, error }: {
+  mobile: boolean; draft: string; setDraft: (s: string) => void; attachments: Attachment[]; removeAttachment: (key: number) => void;
   canAttach: boolean; onAttach: () => void; onSend: () => void; error: string | null;
 }) {
-  const ready = !!(draft.trim() || (attachment && attachment.id)) && !attachment?.uploading;
+  const ready = !!(draft.trim() || attachments.some((a) => a.id)) && !attachments.some((a) => a.uploading);
   const sendStyle = { background: ready ? "var(--primary-bg)" : "var(--raised)", color: ready ? "var(--primary-fg)" : "var(--subtle)" };
-  const chipMeta = attachment ? (attachment.uploading ? "Uploading…" : attachment.error ? attachment.error : `${fileKind(attachment.name, attachment.media)} · ${fileSize(attachment.size)} · attached`) : "";
+  const chipMeta = (a: Attachment) => (a.uploading ? "Uploading…" : a.error ? a.error : `${fileKind(a.name, a.media)} · ${fileSize(a.size)} · attached`);
   const box = (
     <div style={{ display: "flex", flexDirection: "column", gap: mobile ? 6 : 8, padding: mobile ? 6 : 8, borderRadius: 20, background: "var(--surface)", border: "1px solid var(--border-strong)", boxShadow: mobile ? undefined : "var(--shadow-1)" }}>
-      {attachment && (
-        <div style={{ display: "flex", alignItems: "center", gap: mobile ? 8 : 10, padding: mobile ? "4px 4px 4px 10px" : "6px 6px 6px 10px", borderRadius: 12, background: "var(--raised)", alignSelf: mobile ? "stretch" : "flex-start", maxWidth: "100%", minWidth: 0 }}>
-          <Icon name={attachment.uploading ? "progress_activity" : fileIcon(attachment.name, attachment.media)} size={mobile ? 18 : 20} className={attachment.uploading ? "spin" : ""} style={{ color: attachment.error ? "var(--danger)" : "var(--danger)" }} />
-          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: mobile ? 1 : undefined }}>
-            <span className="wrap" style={{ fontSize: mobile ? 12.5 : 13, fontWeight: 500 }}>{attachment.name}</span>
-            <span style={{ fontSize: 11.5, color: attachment.error ? "var(--danger)" : "var(--muted)" }}>{chipMeta}</span>
-          </div>
-          <button type="button" className="icon-btn" aria-label="Remove attachment" onClick={clearAttachment} style={{ width: mobile ? 36 : 32, height: mobile ? 36 : 32 }}><Icon name="close" size={18} /></button>
+      {attachments.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: mobile ? 6 : 8, flexDirection: mobile ? "column" : "row" }}>
+          {attachments.map((a) => (
+            <div key={a.key} style={{ display: "flex", alignItems: "center", gap: mobile ? 8 : 10, padding: mobile ? "4px 4px 4px 10px" : "6px 6px 6px 10px", borderRadius: 12, background: "var(--raised)", alignSelf: mobile ? "stretch" : "flex-start", maxWidth: "100%", minWidth: 0 }}>
+              <Icon name={a.uploading ? "progress_activity" : fileIcon(a.name, a.media)} size={mobile ? 18 : 20} className={a.uploading ? "spin" : ""} style={{ color: "var(--danger)" }} />
+              <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: mobile ? 1 : undefined }}>
+                <span className="wrap" style={{ fontSize: mobile ? 12.5 : 13, fontWeight: 500 }}>{a.name}</span>
+                <span style={{ fontSize: 11.5, color: a.error ? "var(--danger)" : "var(--muted)" }}>{chipMeta(a)}</span>
+              </div>
+              <button type="button" className="icon-btn" aria-label={`Remove ${a.name}`} onClick={() => removeAttachment(a.key)} style={{ width: mobile ? 36 : 32, height: mobile ? 36 : 32 }}><Icon name="close" size={18} /></button>
+            </div>
+          ))}
         </div>
       )}
       <div style={{ display: "flex", alignItems: "flex-end", gap: mobile ? 6 : 8 }}>

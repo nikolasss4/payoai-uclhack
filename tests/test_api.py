@@ -105,6 +105,27 @@ def test_someone_elses_chat_is_not_found(biz):
     assert client.post(f"/api/chats/{chat}/turns", headers=headers(biz, "APPROVER"), json={"text": "hi"}).status_code == 404
 
 
+def test_a_turn_can_attach_several_documents(biz):
+    team_id = biz["team"]["id"]
+    docs = [store_document(team_id, f"bill-{n}.txt", "text/plain", render_invoice(invoice_fields(f"MULTI-{n}")).encode(), None) for n in range(3)]
+    chat = client.post("/api/chats", headers=headers(biz, "OPERATOR")).json()["id"]
+    sent = client.post(f"/api/chats/{chat}/turns", headers=headers(biz, "OPERATOR"), json={"text": "Pay these", "document_ids": docs})
+    assert sent.status_code == 200
+    [turn] = client.get(f"/api/chats/{chat}/turns", headers=headers(biz, "OPERATOR")).json()
+    assert turn["text"] == "Pay these"
+    assert [d["id"] for d in turn["documents"]] == docs
+    with tx() as conn:
+        stored = fetch_one(conn, "SELECT user_input FROM turns WHERE id = %s", (sent.json()["id"],))["user_input"]
+    assert stored.split("\n[The user attached document_id")[0] == "Pay these"
+
+
+def test_a_turn_rejects_another_teams_document(biz):
+    chat = client.post("/api/chats", headers=headers(biz, "OPERATOR")).json()["id"]
+    own = store_document(biz["team"]["id"], "mine.txt", "text/plain", b"hello", None)
+    sent = client.post(f"/api/chats/{chat}/turns", headers=headers(biz, "OPERATOR"), json={"text": "Pay", "document_ids": [own, "doc_not_ours"]})
+    assert sent.status_code == 404
+
+
 def test_webhook_needs_a_valid_signature():
     assert client.post("/api/webhooks/simulator", content=b"{}", headers={"x-sim-signature": "forged"}).status_code == 400
     body = b'{"event_id": "e1", "external_id": "nope"}'

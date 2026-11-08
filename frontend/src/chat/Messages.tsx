@@ -105,15 +105,15 @@ function DraftMsg({ text }: { text: string }) {
 function UserMsg({ m }: { m: Extract<Item, { t: "user" }> }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, animation: "rise .2s", opacity: m.sending ? 0.7 : 1 }}>
-      {m.file && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px 10px 10px", borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)", maxWidth: "85%" }}>
-          <span style={{ width: 36, height: 36, borderRadius: 9, background: "var(--danger-bg)", color: "var(--danger)", display: "grid", placeItems: "center", flex: "none" }}><Icon name={fileIcon(m.file.name, m.file.media)} size={20} /></span>
+      {m.files.map((file, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px 10px 10px", borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)", maxWidth: "85%" }}>
+          <span style={{ width: 36, height: 36, borderRadius: 9, background: "var(--danger-bg)", color: "var(--danger)", display: "grid", placeItems: "center", flex: "none" }}><Icon name={fileIcon(file.name, file.media)} size={20} /></span>
           <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-            <span className="wrap" style={{ fontSize: 13.5, fontWeight: 500 }}>{m.file.name}</span>
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>{m.file.meta}</span>
+            <span className="wrap" style={{ fontSize: 13.5, fontWeight: 500 }}>{file.name}</span>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>{file.meta}</span>
           </div>
         </div>
-      )}
+      ))}
       {m.text && <div className="wrap" style={{ maxWidth: "85%", padding: "11px 16px", borderRadius: "20px 20px 6px 20px", background: "var(--primary-bg)", color: "var(--primary-fg)", fontSize: 15, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>}
       {m.sending && <span style={{ fontSize: 12, color: "var(--muted)" }}>Sending…</span>}
     </div>
