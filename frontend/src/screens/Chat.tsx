@@ -8,7 +8,7 @@ import { dayLabel, fileIcon, fileKind, fileSize } from "../lib";
 import { ErrorLine, Icon } from "../ui";
 import { MemoryList, useMemories } from "./Memory";
 
-const PROMPTS = ["Pay this bill", "Can we cover next week's bills?", "Which expenses are missing receipts?", "Why was this payment blocked?"];
+const PROMPTS = ["Pay Alex Chen 50 quid", "I need to pay a batch of bills", "Can we cover next week's bills?", "Which expenses are missing receipts?"];
 
 interface Attachment { key: number; name: string; size: number; media: string; id?: string; uploading: boolean; error?: string }
 
@@ -106,7 +106,7 @@ export function ChatScreen() {
 
   const newChat = () => { setActive(null); setDraft(""); setAttachments([]); };
   const prompt = (t: string) => {
-    if (t === "Pay this bill" && canWrite) { setDraft(t); pickFile(); } else send(t);
+    if (t === "I need to pay a batch of bills" && canWrite) { setDraft(t); pickFile(); } else send(t);
   };
   const title = (chats.data || []).find((c) => c.id === active)?.title || (active ? "Chat" : "New chat");
   const empty = !active ? !chat.items.length : chat.empty;
@@ -222,7 +222,7 @@ function MemoryPanel({ leaving, onClose }: { leaving?: boolean; onClose: () => v
 }
 
 // Each suggestion's icon and colours, in the order of PROMPTS.
-const PROMPT_LOOK: [string, string, string][] = [["receipt_long", "var(--accent)", "#0B0B0C"], ["account_balance", "#0B0B0C", "var(--accent)"], ["shield", "var(--raised)", "var(--text)"], ["schedule", "var(--raised)", "var(--text)"]];
+const PROMPT_LOOK: [string, string, string][] = [["payments", "var(--accent)", "#0B0B0C"], ["receipt_long", "#0B0B0C", "var(--accent)"], ["account_balance", "var(--raised)", "var(--text)"], ["shield", "var(--raised)", "var(--text)"]];
 
 function ReadyChip({ mobile }: { mobile: boolean }) {
   return (
