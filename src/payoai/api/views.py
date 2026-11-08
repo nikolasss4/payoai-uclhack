@@ -684,21 +684,20 @@ def suggestions(conn, team_id: str, findings) -> list[dict]:
 
 # Chat
 
-ATTACHED = re.compile(r"\n?\[The user attached document_id ([A-Za-z0-9_]+)\]\s*$")
+ATTACHED = re.compile(r"\n?\[The user attached document_id ([A-Za-z0-9_]+)\]")
 ANSWERED = re.compile(r"\s*\[answer value: [^\]]*\]\s*$")
 
 
 def turn_rows(conn, team_id: str, chat_id: str) -> list[dict]:
     rows = fetch_all(conn, "SELECT id, seq, user_input, status, started_at, ended_at FROM turns WHERE chat_id = %s ORDER BY seq", (chat_id,))
-    doc_ids = [m.group(1) for m in (ATTACHED.search(r["user_input"]) for r in rows) if m]
+    doc_ids = [d for r in rows for d in ATTACHED.findall(r["user_input"])]
     docs = {d["id"]: d for d in fetch_all(conn, "SELECT id, filename, media_type FROM documents WHERE team_id = %s AND id = ANY(%s)", (team_id, doc_ids))} if doc_ids else {}
     out = []
     for r in rows:
         text = r["user_input"]
-        found = ATTACHED.search(text)
-        document = docs.get(found.group(1)) if found else None
+        documents = [docs[d] for d in ATTACHED.findall(text) if d in docs]
         text = ANSWERED.sub("", ATTACHED.sub("", text)).strip()
-        out.append({"id": r["id"], "seq": r["seq"], "text": text, "status": r["status"], "at": iso(r["started_at"]), "ended_at": iso(r["ended_at"]), "document": document})
+        out.append({"id": r["id"], "seq": r["seq"], "text": text, "status": r["status"], "at": iso(r["started_at"]), "ended_at": iso(r["ended_at"]), "documents": documents})
     return out
 
 
