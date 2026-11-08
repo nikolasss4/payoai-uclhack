@@ -682,6 +682,18 @@ def cash_latest(me: Member = Depends(member)):
         # Bills behind a shortfall, labelled from the live records.
         for entry in row["result"].get("by_asset", []):
             entry["driving"] = views.bill_rows_by_id(conn, me.team_id, entry.get("driving_bills") or [])
+            # Re-format from the stored minor units, so an analysis saved under an older format reads like today's.
+            asset = entry.get("asset")
+            if entry.get("projected_minor") is not None:
+                entry["projected"] = format_minor(entry["projected_minor"], asset)
+            for d in entry.get("daily") or []:
+                if d.get("position_minor") is not None:
+                    d["position"] = _signed(d["position_minor"], asset)
+    return {**row, "created_at": views.iso(row["created_at"])}
+
+
+def _signed(minor: int, asset: str) -> str:
+    return f"−{format_minor(-minor, asset)}" if minor < 0 else format_minor(minor, asset)
     return {**row, "created_at": views.iso(row["created_at"])}
 
 
