@@ -7,6 +7,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import time
 from datetime import date
@@ -124,14 +125,51 @@ def create_chat(me: Member = Depends(member)):
     return {"id": chat_id}
 
 
+# Each chat's latest Turn comes from the (chat_id, seq) index, and the latest reply is only looked up
+# for the 30 chats shown, through a partial index on REPLY events. Previews are cut short in SQL.
+CHAT_LIST_SQL = """
+SELECT c.id, c.title, c.created_at, c.last_at, c.last_input,
+       CASE WHEN r.created_at >= c.last_at THEN r.text END AS last_reply
+FROM (
+  SELECT c.id, c.title, c.created_at, COALESCE(t.started_at, c.created_at) AS last_at, left(t.user_input, 400) AS last_input
+  FROM chats c
+  LEFT JOIN LATERAL (SELECT started_at, user_input FROM turns WHERE chat_id = c.id ORDER BY seq DESC LIMIT 1) t ON true
+  WHERE c.team_id = %s AND c.user_id = %s
+  ORDER BY last_at DESC
+  LIMIT 30
+) c
+LEFT JOIN LATERAL (
+  SELECT created_at, left(payload->>'text', 400) AS text FROM chat_events
+  WHERE chat_id = c.id AND kind = 'REPLY' ORDER BY id DESC LIMIT 1
+) r ON true
+ORDER BY c.last_at DESC
+"""
+ATTACHED_NOTE = re.compile(r"\n?\[The user attached document_id [^\]]*\]")
+MARKDOWN = re.compile(r"[*_`#>]+")
+
+
+def _preview(text: str | None) -> str | None:
+    """One plain line: Chip markers become their record kind, and markdown and newlines go."""
+    if not text:
+        return None
+    text = ATTACHED_NOTE.sub("", text)
+    text = chips.CITATION.sub(lambda m: m.group(1), text)
+    text = " ".join(MARKDOWN.sub("", text).split())
+    return text[:140] or None
+
+
 @app.get("/api/chats")
 def list_chats(me: Member = Depends(member)):
     with tx() as conn:
-        return fetch_all(
-            conn,
-            "SELECT c.id, c.title, c.created_at, COALESCE(max(t.started_at), c.created_at) AS last_at FROM chats c LEFT JOIN turns t ON t.chat_id = c.id WHERE c.team_id = %s AND c.user_id = %s GROUP BY c.id ORDER BY last_at DESC LIMIT 30",
-            (me.team_id, me.user_id),
-        )
+        rows = fetch_all(conn, CHAT_LIST_SQL, (me.team_id, me.user_id))
+    out = []
+    for r in rows:
+        reply = _preview(r.pop("last_reply"))
+        user = _preview(r.pop("last_input"))
+        r["last_message"] = reply or user
+        r["last_from"] = "agent" if reply else ("user" if user else None)
+        out.append(r)
+    return out
 
 
 def _own_chat(conn, me: Member, chat_id: str) -> dict:

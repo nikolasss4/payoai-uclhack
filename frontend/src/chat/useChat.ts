@@ -9,7 +9,7 @@ export interface ChatEvent {
   question_status?: string; answer_label?: string | null; flagged?: { check_name: string; outcome: string; reason: string }[];
 }
 export interface Turn { id: string; seq: number; text: string; status: string; at: string; document?: { id: string; filename: string; media_type: string } | null }
-export interface ChatRow { id: string; title: string | null; created_at: string; last_at: string }
+export interface ChatRow { id: string; title: string | null; created_at: string; last_at: string; last_message: string | null; last_from: "user" | "agent" | null }
 
 export type Item =
   | { t: "user"; key: string; text: string; file?: { name: string; meta: string; media?: string } | null; sending?: boolean }
