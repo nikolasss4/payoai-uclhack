@@ -13,6 +13,9 @@ def test_money_is_exact():
     assert to_minor("1,250.00", "GBP") == 125000
     assert to_minor("300", "USDC") == 300000000
     assert format_minor(125000, "GBP") == "£1,250.00"
+    assert format_minor(2_000_000_000, "USDC") == "2,000.00 USDC"
+    assert format_minor(1_500_000, "USDC") == "1.50 USDC"
+    assert format_minor(1_234_567, "USDC") == "1.234567 USDC"
     with pytest.raises(TypeError):
         to_minor(1.5, "GBP")
     with pytest.raises(ValueError):
