@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from payoai.agent.config import STEPS, cost_micros
-from payoai.db import fetch_one, tx
+from payoai.agent import runtime_key
 from payoai.trace import TraceContext, step
 
 _clients: dict[str, Any] = {}
@@ -45,13 +45,8 @@ def set_fake(fake) -> None:
 
 
 def api_key(team_id: str | None) -> str | None:
-    """A key pasted in the app for this team comes first, then GEMINI_API_KEY from .env.agent."""
-    if team_id:
-        with tx() as conn:
-            row = fetch_one(conn, "SELECT api_key FROM gemini_keys WHERE team_id = %s", (team_id,))
-        if row:
-            return row["api_key"]
-    return os.environ.get("GEMINI_API_KEY") or None
+    """A key pasted in the app for this team comes first (held in memory only), then GEMINI_API_KEY."""
+    return runtime_key.get(team_id) or os.environ.get("GEMINI_API_KEY") or None
 
 
 def client(team_id: str | None = None):
