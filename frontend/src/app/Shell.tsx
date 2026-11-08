@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useArmed, useDismiss, useAction } from "../hooks";
-import { initials, ROLE_HINT, words } from "../lib";
+import { ROLE_HINT, ROLE_STYLE, words } from "../lib";
 import { RecordView, TITLES } from "../records/RecordView";
 import { Audit } from "../screens/Audit";
 import { Cash } from "../screens/Cash";
@@ -8,18 +8,11 @@ import { ChatScreen } from "../screens/Chat";
 import { Dashboard } from "../screens/Dashboard";
 import { Expenses } from "../screens/Expenses";
 import { Payments } from "../screens/Payments";
-import { ErrorLine, Icon } from "../ui";
+import { Avatar, ErrorLine, Icon } from "../ui";
 import { setPaused, useApp, type Section } from "./context";
+import { usePicture, type Picture } from "./pictures";
 
 const NAV: [Section, string, string][] = [["chat", "Agent", "auto_awesome"], ["approvals", "Dashboard", "space_dashboard"], ["payments", "Payments", "payments"], ["cash", "Cash", "account_balance_wallet"], ["expenses", "Expenses", "receipt_long"], ["audit", "Audit", "history"]];
-
-function Strip({ height }: { height: number }) {
-  return (
-    <div role="note" style={{ flex: "none", height, display: "flex", alignItems: "center", justifyContent: "center", gap: height > 24 ? 6 : 5, background: "var(--text)", color: "var(--bg)", fontFamily: "var(--mono)", fontSize: height > 24 ? 12 : 11.5, letterSpacing: ".02em" }}>
-      <Icon name="science" size={height > 24 ? 15 : 14} />Synthetic data. No real money.
-    </div>
-  );
-}
 
 function Screen({ section }: { section: Section }) {
   switch (section) {
@@ -56,16 +49,36 @@ function PausedBanner({ mobile }: { mobile: boolean }) {
   );
 }
 
-function OrgMenuList({ onPick }: { onPick: () => void }) {
-  const { session, switchTeam } = useApp();
+const ringOf = (role: string) => ROLE_STYLE[role]?.ring || "var(--border)";
+const itemStyle = { border: 0, width: "100%", background: "transparent", textAlign: "left" as const };
+
+/** Change or remove a picture, from inside a menu. The file input itself lives in the shell. */
+function PictureItems({ pic, what }: { pic: Picture; what: string }) {
+  return (
+    <>
+      <button type="button" className="menu-item" onClick={pic.choose} aria-busy={pic.busy || undefined} style={itemStyle}>
+        <Icon name={pic.busy ? "progress_activity" : "add_a_photo"} size={19} className={pic.busy ? "spin" : ""} />{pic.current ? `Change ${what}` : `Add ${what}`}
+      </button>
+      {pic.current && (
+        <button type="button" className="menu-item" onClick={pic.remove} style={itemStyle}>
+          <Icon name="hide_image" size={19} />Remove {what}
+        </button>
+      )}
+      {pic.error && <div style={{ padding: "4px 12px 8px" }}><ErrorLine error={pic.error} /></div>}
+    </>
+  );
+}
+
+function OrgMenuList({ onPick, pic }: { onPick: () => void; pic: Picture }) {
+  const { session, switchTeam, isA } = useApp();
   return (
     <>
       <div className="kicker" style={{ padding: "8px 12px", fontSize: 11.5 }}>Organisation</div>
       {session.teams.map((t) => {
         const on = t.id === session.team.id;
         return (
-          <button key={t.id} type="button" className="menu-item" onClick={() => { switchTeam(t.id); onPick(); }} style={{ minHeight: 48, gap: 10, background: on ? "var(--raised)" : "transparent", border: 0, width: "100%", textAlign: "left" }}>
-            <span style={{ width: 28, height: 28, borderRadius: 8, background: "var(--text)", color: "var(--bg)", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 600, flex: "none" }}>{initials(t.name)}</span>
+          <button key={t.id} type="button" className="menu-item" onClick={() => { switchTeam(t.id); onPick(); }} style={{ ...itemStyle, minHeight: 48, gap: 10, background: on ? "var(--raised)" : "transparent" }}>
+            <Avatar name={t.name} src={t.avatar_url} size={36} square />
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
               <span style={{ fontSize: 14, fontWeight: 500 }}>{t.name}</span>
               <span style={{ fontSize: 12, color: "var(--muted)" }}>{words(t.role)}{t.members ? ` · ${t.members} member${t.members === 1 ? "" : "s"}` : ""}</span>
@@ -74,17 +87,25 @@ function OrgMenuList({ onPick }: { onPick: () => void }) {
           </button>
         );
       })}
+      {isA && <><div style={{ height: 1, background: "var(--border)", margin: "6px 4px" }} /><PictureItems pic={pic} what="organisation picture" /></>}
     </>
   );
 }
 
-function UserMenuList({ onPick }: { onPick: () => void }) {
+function UserMenuList({ onPick, pic }: { onPick: () => void; pic: Picture }) {
   const { session, isA, controls, signOut, theme, toggleTheme } = useApp();
   const act = useAction();
   const role = session.team.role;
   return (
     <>
-      <div style={{ padding: "10px 12px", fontSize: 13, color: "var(--muted)" }}>{session.user.name} · {words(role)} · {ROLE_HINT[role]}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px 12px" }}>
+        <Avatar name={session.user.name} src={session.user.avatar_url} size={40} ring={ringOf(role)} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>{session.user.name}</span>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{words(role)} · {ROLE_HINT[role]}</span>
+        </div>
+      </div>
+      <PictureItems pic={pic} what="profile picture" />
       {isA && !controls?.payments_paused && (
         <button type="button" className="menu-item" onClick={() => act.run(async () => { await setPaused(true); onPick(); })} style={{ color: "var(--danger)", border: 0, width: "100%", background: "transparent", textAlign: "left" }}>
           <Icon name="pause_circle" size={19} />Pause all payments
@@ -106,6 +127,8 @@ export function WebShell() {
   const app = useApp();
   const { session, nav, go, wide, pendingCount, notifications, open, close, back } = app;
   const [menu, setMenu] = useState<"org" | "user" | null>(null);
+  const mePic = usePicture("me");
+  const teamPic = usePicture("team");
   const orgRef = useDismiss(menu === "org", () => setMenu(null));
   const userRef = useDismiss(menu === "user", () => setMenu(null));
   const top = nav.stack[nav.stack.length - 1];
@@ -114,7 +137,7 @@ export function WebShell() {
 
   return (
     <div data-screen-label="PayoAI Web" style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)", color: "var(--text)", overflow: "hidden", position: "relative" }}>
-      <Strip height={28} />
+      {mePic.input}{teamPic.input}
       <header style={{ flex: "none", height: 60, display: "flex", alignItems: "center", gap: 12, padding: "0 20px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
         <span className="display" style={{ marginRight: 12, fontWeight: 700, fontSize: 19, letterSpacing: "-0.03em", whiteSpace: "nowrap" }}>PayoAI</span>
         <nav aria-label="Main" className="scroll-x-none" style={{ display: "flex", flexWrap: "nowrap", minWidth: 0, overflowX: "auto", flex: "0 1 auto", gap: 4, padding: 4, borderRadius: 999, background: "var(--raised)" }}>
@@ -145,20 +168,20 @@ export function WebShell() {
           <div ref={orgRef} style={{ position: "relative" }}>
             <button type="button" aria-label="Switch organisation" aria-expanded={menu === "org"} onClick={() => setMenu(menu === "org" ? null : "org")} className="hoverable"
               style={{ display: "flex", alignItems: "center", gap: 8, height: 44, padding: "0 10px 0 6px", borderRadius: 999, cursor: "pointer", background: menu === "org" ? "var(--raised)" : "transparent", border: 0 }}>
-              <span style={{ width: 30, height: 30, borderRadius: 8, background: "var(--text)", color: "var(--bg)", display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 600 }}>{initials(session.team.name)}</span>
+              <Avatar name={session.team.name} src={session.team.avatar_url} size={30} square />
               {wide && <span style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 170 }}>{session.team.name}</span>}
               <Icon name="expand_more" size={20} style={{ color: "var(--muted)" }} />
             </button>
-            {menu === "org" && <div className="menu" style={{ position: "absolute", right: 0, top: 50, zIndex: 40, width: 300 }}><OrgMenuList onPick={() => setMenu(null)} /></div>}
+            {menu === "org" && <div className="menu" style={{ position: "absolute", right: 0, top: 50, zIndex: 40, width: 300 }}><OrgMenuList onPick={() => setMenu(null)} pic={teamPic} /></div>}
           </div>
           <div ref={userRef} style={{ position: "relative" }}>
             <button type="button" aria-label="Account" aria-expanded={menu === "user"} onClick={() => setMenu(menu === "user" ? null : "user")} className="hoverable"
               style={{ display: "flex", alignItems: "center", gap: 10, height: 44, padding: "0 10px 0 4px", borderRadius: 999, cursor: "pointer", border: 0, background: menu === "user" ? "var(--raised)" : "transparent" }}>
-              <span style={{ width: 34, height: 34, borderRadius: "50%", background: "var(--raised)", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }}>{initials(session.user.name)}</span>
+              <Avatar name={session.user.name} src={session.user.avatar_url} size={34} ring={ringOf(session.team.role)} />
               {wide && <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2, textAlign: "left" }}><span style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap" }}>{session.user.name}</span><span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{words(session.team.role)}</span></div>}
               <Icon name="expand_more" size={20} style={{ color: "var(--muted)" }} />
             </button>
-            {menu === "user" && <div className="menu" style={{ position: "absolute", right: 0, top: 50, zIndex: 40, width: 260 }}><UserMenuList onPick={() => setMenu(null)} /></div>}
+            {menu === "user" && <div className="menu" style={{ position: "absolute", right: 0, top: 50, zIndex: 40, width: 280 }}><UserMenuList onPick={() => setMenu(null)} pic={mePic} /></div>}
           </div>
         </div>
       </header>
@@ -168,8 +191,8 @@ export function WebShell() {
       </div>
       {top && (
         <>
-          <div onClick={close} style={{ position: "absolute", inset: "28px 0 0 0", background: "var(--scrim)", zIndex: 50, animation: "rise .15s" }} />
-          <aside role="dialog" aria-label={TITLES[top.kind]} style={{ position: "absolute", top: 28, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", animation: "panelIn .22s ease-out", borderLeft: "1px solid var(--border)" }}
+          <div onClick={close} style={{ position: "absolute", inset: 0, background: "var(--scrim)", zIndex: 50, animation: "rise .15s" }} />
+          <aside role="dialog" aria-label={TITLES[top.kind]} style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", animation: "panelIn .22s ease-out", borderLeft: "1px solid var(--border)" }}
             onKeyDown={(e) => { if (e.key === "Escape") close(); }}>
             <div style={{ flex: "none", height: 60, display: "flex", alignItems: "center", gap: 8, padding: "0 10px 0 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
               {nav.stack.length > 1 && <button type="button" className="icon-btn" aria-label="Back" onClick={back}><Icon name="arrow_back" size={22} /></button>}
@@ -197,6 +220,8 @@ function NavItem({ id, label, icon, active, badge, onClick }: { id: string; labe
 export function MobileShell() {
   const { session, nav, go, pendingCount, notifications, open, back } = useApp();
   const [menu, setMenu] = useState<"org" | "user" | null>(null);
+  const mePic = usePicture("me");
+  const teamPic = usePicture("team");
   const ref = useDismiss(menu !== null, () => setMenu(null));
   const top = nav.stack[nav.stack.length - 1];
   const unread = notifications?.unread || 0;
@@ -215,7 +240,7 @@ export function MobileShell() {
 
   return (
     <div data-screen-label="PayoAI Mobile" style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)", position: "relative", overflow: "hidden" }}>
-      <Strip height={24} />
+      {mePic.input}{teamPic.input}
       <div ref={ref} style={{ flex: "none", position: "relative", zIndex: 40 }}>
         <header style={{ display: "flex", alignItems: "center", gap: 2, padding: "6px 6px 6px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)", minHeight: 56 }}>
           <span className="display" style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 17, letterSpacing: "-0.03em", whiteSpace: "nowrap" }}>PayoAI</span>
@@ -225,15 +250,15 @@ export function MobileShell() {
             {unread > 0 && <span style={{ position: "absolute", top: 4, right: 1, minWidth: 18, height: 18, padding: "0 5px", borderRadius: 999, background: "var(--danger)", color: "#fff", fontSize: 10.5, fontWeight: 600, display: "grid", placeItems: "center", border: "2px solid var(--surface)" }}>{unread > 99 ? "99+" : unread}</span>}
           </button>
           <button type="button" className="icon-btn" aria-label="Switch organisation" onClick={() => setMenu(menu === "org" ? null : "org")} style={{ borderRadius: 12 }}>
-            <span style={{ width: 30, height: 30, borderRadius: 8, background: "var(--text)", color: "var(--bg)", display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 600 }}>{initials(session.team.name)}</span>
+            <Avatar name={session.team.name} src={session.team.avatar_url} size={30} square />
           </button>
           <button type="button" className="icon-btn" aria-label="Account" onClick={() => setMenu(menu === "user" ? null : "user")}>
-            <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--raised)", border: "1px solid var(--border)", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }}>{initials(session.user.name)}</span>
+            <Avatar name={session.user.name} src={session.user.avatar_url} size={32} ring={ringOf(session.team.role)} />
           </button>
         </header>
         {menu && (
           <div className="menu" style={{ position: "absolute", left: 12, right: 12, top: 62, zIndex: 40, boxShadow: "0 12px 32px rgba(11,11,12,.18)" }}>
-            {menu === "org" ? <OrgMenuList onPick={() => setMenu(null)} /> : <UserMenuList onPick={() => setMenu(null)} />}
+            {menu === "org" ? <OrgMenuList onPick={() => setMenu(null)} pic={teamPic} /> : <UserMenuList onPick={() => setMenu(null)} pic={mePic} />}
           </div>
         )}
       </div>

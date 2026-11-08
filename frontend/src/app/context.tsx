@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, onSignedOut, prefs, setSession, storage, type Session } from "../api";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { api, onSignedOut, prefs, refreshProfile, setSession, storage, type Session } from "../api";
 import { refreshAll, useLive, useMedia } from "../hooks";
 
 export type Section = "chat" | "approvals" | "payments" | "cash" | "expenses" | "audit";
@@ -55,6 +55,7 @@ interface Ctx {
   notifications: { unread: number; items: NotificationItem[] } | undefined;
   reloadShell: () => void;
   signOut: () => void;
+  updateSession: (fn: (s: Session) => Session) => void;
   switchTeam: (id: string) => void;
   theme: "light" | "dark";
   toggleTheme: () => void;
@@ -104,6 +105,21 @@ export function AppProvider({ session, onSession, children }: { session: Session
   }, [onSession]);
   useEffect(() => { onSignedOut(signOut); }, [signOut]);
 
+  // The latest session, so an update made after an await builds on what's current.
+  const latest = useRef(session);
+  latest.current = session;
+  const updateSession = useCallback((fn: (s: Session) => Session) => {
+    const next = fn(latest.current);
+    latest.current = next;
+    setSession(next);
+    onSession(next);
+  }, [onSession]);
+  useEffect(() => {
+    let live = true;
+    refreshProfile(latest.current).then((next) => { if (live) updateSession(() => next); }).catch(() => { /* The stored profile still works. */ });
+    return () => { live = false; };
+  }, [updateSession]);
+
   const role = session.team.role;
   const isA = role === "APPROVER", isO = role === "OPERATOR", isV = role === "VIEWER";
 
@@ -142,9 +158,9 @@ export function AppProvider({ session, onSession, children }: { session: Session
 
   const value = useMemo<Ctx>(() => ({
     session, isA, isO, isV, canWrite: isA || isO, mobile, wide, nav, go, setPayTab, open, back, close,
-    controls: controls.data, pendingCount, notifications: notifications.data, reloadShell, signOut, switchTeam,
+    controls: controls.data, pendingCount, notifications: notifications.data, reloadShell, signOut, updateSession, switchTeam,
     theme, toggleTheme: toggle, chatRequest, requestChat, doneChatRequest,
-  }), [session, isA, isO, isV, mobile, wide, nav, go, setPayTab, open, back, close, controls.data, pendingCount, notifications.data, reloadShell, signOut, switchTeam, theme, toggle, chatRequest, requestChat, doneChatRequest]);
+  }), [session, isA, isO, isV, mobile, wide, nav, go, setPayTab, open, back, close, controls.data, pendingCount, notifications.data, reloadShell, signOut, updateSession, switchTeam, theme, toggle, chatRequest, requestChat, doneChatRequest]);
 
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

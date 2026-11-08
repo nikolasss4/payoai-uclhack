@@ -7,6 +7,7 @@ Full account numbers never leave through these views. Only the audited reveal ro
 import re
 from collections import defaultdict
 
+from payoai.api import avatars
 from payoai.db import fetch_all, fetch_one
 from payoai.domain.money import format_minor
 from payoai.trace import redact
@@ -120,6 +121,8 @@ EVENT_TEXT = {
     "MandateDrafted": "Mandate drafted",
     "MemoryObservation": "Preference learned",
     "OrderPlaced": "Order placed",
+    "OrganisationPictureChanged": "Organisation picture changed",
+    "OrganisationPictureRemoved": "Organisation picture removed",
     "PaymentIntentPrepared": "Payment prepared",
     "PaymentManuallyResolved": "Payment resolved by hand",
     "PaymentStoppedBeforeSend": "Payment stopped before sending",
@@ -160,8 +163,9 @@ def audit_feed(conn, team_id: str, actor: str | None, limit: int) -> dict:
     rows = fetch_all(
         conn,
         """
-        SELECT e.id, e.actor_type, e.actor_id, e.event_type, e.entity_type, e.entity_id, e.data, e.created_at, u.name AS user_name
+        SELECT e.id, e.actor_type, e.actor_id, e.event_type, e.entity_type, e.entity_id, e.data, e.created_at, u.name AS user_name, a.updated_at AS avatar_at
         FROM audit_events e LEFT JOIN users u ON u.id = e.actor_id
+        LEFT JOIN avatars a ON e.actor_type = 'USER' AND a.owner_kind = 'user' AND a.owner_id = e.actor_id
         WHERE e.team_id = %s AND (%s::text IS NULL OR e.actor_type = %s) ORDER BY e.id DESC LIMIT %s
         """,
         (team_id, actor, actor, limit),
@@ -176,6 +180,7 @@ def audit_feed(conn, team_id: str, actor: str | None, limit: int) -> dict:
                 "at": iso(r["created_at"]),
                 "actor_type": r["actor_type"],
                 "who": actor_name(r["actor_type"], r["actor_id"], r["user_name"]),
+                "photo": avatars.url("user", r["actor_id"], r["avatar_at"]),
                 "what": event_text(r["event_type"], r["data"]),
                 "event_type": r["event_type"],
                 "record": records.get((r["entity_type"], r["entity_id"])),
@@ -203,8 +208,9 @@ def _turn_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[li
         conn,
         """
         SELECT t.id, t.seq, t.chat_id, t.user_input, t.final_reply, t.model, t.status, t.cost_micros, t.started_at, t.ended_at,
-               c.title AS chat_title, u.name AS user_name, s.n AS steps, s.failed, s.tokens, s.cost, s.runs
+               c.title AS chat_title, c.user_id, u.name AS user_name, a.updated_at AS avatar_at, s.n AS steps, s.failed, s.tokens, s.cost, s.runs
         FROM turns t JOIN chats c ON c.id = t.chat_id LEFT JOIN users u ON u.id = c.user_id
+        LEFT JOIN avatars a ON a.owner_kind = 'user' AND a.owner_id = c.user_id
         LEFT JOIN LATERAL (
             SELECT count(*) AS n, count(*) FILTER (WHERE st.status = 'FAILED') AS failed,
                    COALESCE(sum(COALESCE(st.input_tokens, 0) + COALESCE(st.output_tokens, 0)), 0) AS tokens,
@@ -225,6 +231,7 @@ def _turn_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[li
             "at": iso(r["started_at"]),
             "actor_type": "AGENT",
             "who": r["user_name"] or "Unknown person",
+            "photo": avatars.url("user", r["user_id"], r["avatar_at"]),
             "what": r["user_input"],
             "reply": r["final_reply"],
             "chat": r["chat_title"],
@@ -251,8 +258,9 @@ def _run_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[lis
         conn,
         f"""
         SELECT r.id, r.routine, r.trigger_type, r.triggered_by, r.status, r.error, r.created_at, r.updated_at, u.name AS user_name,
-               s.n AS steps, s.failed, s.tokens, s.cost, s.last_end
+               a.updated_at AS avatar_at, s.n AS steps, s.failed, s.tokens, s.cost, s.last_end
         FROM routine_runs r LEFT JOIN users u ON u.id = r.triggered_by
+        LEFT JOIN avatars a ON a.owner_kind = 'user' AND a.owner_id = r.triggered_by
         LEFT JOIN LATERAL (
             SELECT count(*) AS n, count(*) FILTER (WHERE st.status = 'FAILED') AS failed,
                    COALESCE(sum(COALESCE(st.input_tokens, 0) + COALESCE(st.output_tokens, 0)), 0) AS tokens,
@@ -274,6 +282,7 @@ def _run_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[lis
             "at": iso(r["created_at"]),
             "actor_type": actor_type,
             "who": r["user_name"] if actor_type == "USER" and r["user_name"] else actor_name(actor_type, None, None),
+            "photo": avatars.url("user", r["triggered_by"], r["avatar_at"]) if actor_type == "USER" else None,
             "what": f"{words(r['routine'])} routine · {words(r['trigger_type'])}",
             "status": r["status"],
             "error": r["error"],

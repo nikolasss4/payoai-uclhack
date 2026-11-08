@@ -1,4 +1,4 @@
-/* PayoAI v2. Tokens and shared pieces, taken from the Web v2 and Mobile v2 designs. */
+/* PayoAI v3. Tokens and shared pieces, taken from the Web v3 and Mobile v3 designs. */
 
 :root,
 [data-theme="light"] {
@@ -102,7 +102,7 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 .menu-item { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 10px; cursor: pointer; font-size: 14px; }
 .menu-item:hover { background: var(--raised); }
 .skeleton { border-radius: 12px; background: var(--raised); animation: pulse 1.2s infinite; }
-.empty { padding: 56px 20px; border-radius: 16px; border: 1px dashed var(--border-strong); text-align: center; font-size: 15px; color: var(--muted); }
+.empty { padding: 56px 20px; border-radius: 28px; border: 1.5px dashed var(--border-strong); text-align: center; font-size: 15px; color: var(--muted); }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 500; }
 .input { height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font: inherit; font-size: 14px; font-weight: 400; width: 100%; }
 textarea.input { height: auto; min-height: 72px; resize: vertical; padding: 10px 12px; }
@@ -110,12 +110,19 @@ select.input { padding: 0 10px; }
 .notice { display: flex; gap: 10px; padding: 12px 14px; border-radius: 14px; font-size: 14px; line-height: 1.45; align-items: flex-start; }
 .notice .ms { font-size: 20px; }
 
-/* Tables (web lists) */
-.table { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
-.table-head { display: grid; gap: 12px; padding: 10px 16px; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--border); }
-.table-row { display: grid; gap: 12px; align-items: center; padding: 10px 16px; min-height: 58px; border-bottom: 1px solid var(--border); cursor: pointer; }
-.table-row:last-child { border-bottom: 0; }
-.table-row:hover { background: var(--raised); }
+/* Tables (web lists): rounded rows inside one card */
+.table, .list-card { display: flex; flex-direction: column; gap: 2px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 28px; box-shadow: var(--shadow-1); }
+.table-head { display: grid; gap: 12px; padding: 8px 14px 10px; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.table-row { display: grid; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 18px; cursor: pointer; transition: background .15s; }
+.table-row:hover { background: var(--bg); }
+/* Phone list rows: each a tinted pill inside the card */
+.m-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; background: var(--bg); cursor: pointer; text-align: left; border: 0; width: 100%; color: inherit; font: inherit; }
+.m-row:active { background: var(--raised); }
+/* The dark and lime cards on Dashboard and Cash use fixed colours in both themes */
+.ink-card { background: #0B0B0C; color: #F4F4F2; border: 1px solid #2A2A2D; }
+.lift { transition: transform .15s, border-color .15s, box-shadow .15s; }
+.lift:hover { border-color: var(--text) !important; transform: translateY(-2px); }
+.press:active { transform: scale(.97); }
 .list-row { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .list-row:last-child { border-bottom: 0; }
 .list-row:active { background: var(--raised); }
@@ -123,3 +130,4 @@ select.input { padding: 0 10px; }
 .scroll-x-none { scrollbar-width: none; }
 .scroll-x-none::-webkit-scrollbar { display: none; }
 .textarea-auto { field-sizing: content; }
+.ink-chip:hover { background: rgba(244,244,242,.14) !important; }
