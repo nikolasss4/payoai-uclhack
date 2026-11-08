@@ -125,6 +125,8 @@ PROVIDER_MODE=simulator
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
+You can also leave this out and paste a key in the app. When there's no key, the chat says so and shows a field for one. A pasted key is saved for that team in the database, and the agent worker uses it ahead of `GEMINI_API_KEY`.
+
 **`.env.api`** (the API)
 
 ```bash

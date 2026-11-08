@@ -99,6 +99,17 @@ def test_pause_blocks_approval_through_the_api(biz, prepared):
     assert result["won"] is False and "paused" in result["message"]
 
 
+def test_a_pasted_gemini_key_is_saved_for_the_team_and_never_returned(biz, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+    assert client.put("/api/team/gemini-key", headers=headers(biz, "VIEWER"), json={"api_key": "AIza-viewer"}).status_code == 403
+    assert client.put("/api/team/gemini-key", headers=headers(biz, "OPERATOR"), json={"api_key": "has spaces"}).status_code == 422
+    response = client.put("/api/team/gemini-key", headers=headers(biz, "OPERATOR"), json={"api_key": " AIza-pasted "})
+    assert response.status_code == 200 and "AIza" not in response.text
+    assert llm.api_key(biz["team"]["id"]) == "AIza-pasted"
+    # A team without a pasted key uses the worker's own key.
+    assert llm.api_key("team_none") == "from-env"
+
+
 def test_someone_elses_chat_is_not_found(biz):
     chat = client.post("/api/chats", headers=headers(biz, "OPERATOR")).json()["id"]
     assert client.get(f"/api/chats/{chat}/events", headers=headers(biz, "APPROVER")).status_code == 404

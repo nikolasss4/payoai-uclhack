@@ -5,7 +5,6 @@ come from the session. Gemini's API stores the conversation, and every step is a
 """
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -115,10 +114,10 @@ def run_turn(team_id: str, user_id: str, chat_id: str, turn_id: str) -> dict:
     try:
         reply, interaction_id = _loop(session, turn["user_input"], previous["interaction_id"] if previous else None)
     except llm.LLMFailure as exc:
-        message = "The assistant is unavailable right now. Your screens, approvals and payments still work."
+        code, message = failure_message(exc)
         with tx() as conn:
             conn.execute("UPDATE turns SET status = 'FAILED', final_reply = %s, ended_at = now() WHERE id = %s", (message, turn_id))
-        emit(team_id, chat_id, "ERROR", {"message": message, "detail": str(exc)[:200]}, turn_id=turn_id)
+        emit(team_id, chat_id, "ERROR", {"message": message, "detail": str(exc)[:200], "code": code}, turn_id=turn_id)
         return {"status": "FAILED", "reply": message}
     with tx() as conn:
         cost = fetch_one(conn, "SELECT COALESCE(sum(cost_micros), 0) AS n FROM trace_steps WHERE turn_id = %s", (turn_id,))["n"]
@@ -128,6 +127,18 @@ def run_turn(team_id: str, user_id: str, chat_id: str, turn_id: str) -> dict:
         )
     emit(team_id, chat_id, "REPLY", {"text": reply}, turn_id=turn_id)
     return {"status": "COMPLETED", "reply": reply}
+
+
+STILL_WORKS = "Your screens, approvals and payments still work."
+
+
+def failure_message(exc: llm.LLMFailure) -> tuple[str | None, str]:
+    """A missing or rejected key is said plainly, so the chat can offer to take a new one."""
+    if isinstance(exc, llm.MissingKey):
+        return "NO_KEY", f"No Gemini API key is configured, so the assistant can't answer. Paste a key below to turn it on. {STILL_WORKS}"
+    if llm.key_rejected(str(exc)):
+        return "BAD_KEY", f"Gemini rejected the configured API key, so the assistant can't answer. Paste a working key below. {STILL_WORKS}"
+    return None, f"The assistant is unavailable right now. {STILL_WORKS}"
 
 
 def _loop(session: Session, user_input: str, previous_id: str | None) -> tuple[str, str | None]:
@@ -211,6 +222,7 @@ DRAFT_EVERY_SECONDS = 0.25
 def _call_gemini(session: Session, config, model_input, previous_id, s, attempts: int = 2) -> ModelTurn:
     """Streams one model call. Thought summaries and reply text are shown as they arrive."""
     last = None
+    gemini = llm.client(session.team_id)  # A missing key fails at once, without retrying.
     for _ in range(attempts):
         kwargs: dict[str, Any] = dict(
             model=config.model,
@@ -226,7 +238,7 @@ def _call_gemini(session: Session, config, model_input, previous_id, s, attempts
         text, calls, args_text, interaction_id, status, usage = "", {}, {}, None, None, None
         shown_draft, last_draft_at = "", 0.0
         try:
-            for event in llm.client().interactions.create(**kwargs):
+            for event in gemini.interactions.create(**kwargs):
                 ev = event.model_dump(exclude_none=True)
                 kind = ev.get("event_type")
                 if kind == "interaction.created":
@@ -416,7 +428,3 @@ def update_task_list(session: Session, items: list[dict]) -> dict:
             )
     emit(session.team_id, session.chat_id, "STATUS", {"task_list": items}, turn_id=session.turn_id)
     return {"saved": len(items)}
-
-
-def needs_key() -> bool:
-    return not os.environ.get("GEMINI_API_KEY")

@@ -7,15 +7,28 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from payoai.agent.config import STEPS, cost_micros
+from payoai.db import fetch_one, tx
 from payoai.trace import TraceContext, step
 
-_client = None
+_clients: dict[str, Any] = {}
 # Lets tests and baselines replace the model without touching any Node.
 _fake: Callable[[str, list, dict | None], dict | str] | None = None
 
 
 class LLMFailure(Exception):
     """The model didn't give a usable result. The caller stops or degrades, never guesses."""
+
+
+class MissingKey(LLMFailure):
+    """No Gemini API key is configured for the team or the worker."""
+
+
+# Phrases Gemini uses when it refuses the key itself, as opposed to any other failure.
+_REJECTED_KEY = ("API_KEY_INVALID", "API key not valid", "API key expired", "API_KEY_EXPIRED")
+
+
+def key_rejected(message: str) -> bool:
+    return any(phrase in message for phrase in _REJECTED_KEY)
 
 
 @dataclass
@@ -31,13 +44,25 @@ def set_fake(fake) -> None:
     _fake = fake
 
 
-def client():
-    global _client
-    if _client is None:
+def api_key(team_id: str | None) -> str | None:
+    """A key pasted in the app for this team comes first, then GEMINI_API_KEY from .env.agent."""
+    if team_id:
+        with tx() as conn:
+            row = fetch_one(conn, "SELECT api_key FROM gemini_keys WHERE team_id = %s", (team_id,))
+        if row:
+            return row["api_key"]
+    return os.environ.get("GEMINI_API_KEY") or None
+
+
+def client(team_id: str | None = None):
+    key = api_key(team_id)
+    if not key:
+        raise MissingKey("no Gemini API key is configured")
+    if key not in _clients:
         from google import genai
 
-        _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    return _client
+        _clients[key] = genai.Client(api_key=key)
+    return _clients[key]
 
 
 def text_part(text: str) -> dict:
@@ -76,16 +101,19 @@ def call(
         with step(ctx, "LLM_CALL", step_name, input={"parts": logged, "system": system}, trust_label=trust_label) as s:
             s.model, s.thinking_level = config.model, config.thinking_level
             try:
-                result = _invoke(step_name, config, parts, schema, system, s)
+                result = _invoke(step_name, config, parts, schema, system, s, ctx.team_id)
                 s.output = result.data if result.data is not None else result.text
                 return result
+            except MissingKey as exc:
+                s.output = {"failed": str(exc)}
+                raise
             except LLMFailure as exc:
                 last_error = exc
                 s.output = {"failed": str(exc)}
     raise LLMFailure(f"{step_name}: {last_error}")
 
 
-def _invoke(step_name, config, parts, schema, system, s) -> LLMResult:
+def _invoke(step_name, config, parts, schema, system, s, team_id=None) -> LLMResult:
     if _fake is not None:
         out = _fake(step_name, parts, schema)
         if isinstance(out, Exception):
@@ -103,8 +131,9 @@ def _invoke(step_name, config, parts, schema, system, s) -> LLMResult:
         kwargs["system_instruction"] = system
     if schema:
         kwargs["response_format"] = {"type": "text", "mime_type": "application/json", "schema": schema}
+    gemini = client(team_id)
     try:
-        response = client().interactions.create(**kwargs)
+        response = gemini.interactions.create(**kwargs)
     except Exception as exc:
         raise LLMFailure(f"{type(exc).__name__}: {exc}"[:500]) from exc
     _record_usage(s, config.model, response)

@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { api } from "../api";
 import { useApp } from "../app/context";
 import { useAction, useLive } from "../hooks";
 import { badge, decisionBadge, fileIcon, hm, label, plural } from "../lib";
@@ -26,7 +27,7 @@ export function Messages({ items, typing, onAnswer, onDecideStart }: {
           case "start": return <StartCard key={m.key} ev={m.ev} onDecide={onDecideStart} />;
           case "question": return <QuestionCard key={m.key} m={m} onAnswer={onAnswer} />;
           case "approval": return <ApprovalChatCard key={m.key} id={m.approvalId} />;
-          case "error": return <ErrorMsg key={m.key} message={m.message} />;
+          case "error": return m.code && m.fixable ? <KeyErrorMsg key={m.key} m={m} onRetry={onAnswer} /> : <ErrorMsg key={m.key} message={m.message} />;
           case "thinking": return <ThinkingCard key={m.key} m={m} />;
           case "draft": return <DraftMsg key={m.key} text={m.text} />;
           default: return null;
@@ -347,6 +348,45 @@ function ApprovalChatCard({ id }: { id: string }) {
       <button type="button" className="btn-pill btn-primary" style={{ minHeight: 46, fontSize: 14.5 }} onClick={() => open({ kind: "approval", id })}>
         {isA && pending ? "Review and decide" : "Open"}<Icon name="arrow_forward" size={18} />
       </button>
+    </div>
+  );
+}
+
+/** No Gemini key, or a rejected one: takes a key for the team's agent, then sends the message again. */
+function KeyErrorMsg({ m, onRetry }: { m: Extract<Item, { t: "error" }>; onRetry: (text: string, shown: string) => Promise<void> }) {
+  const { canWrite } = useApp();
+  const [value, setValue] = useState("");
+  const [saved, setSaved] = useState(false);
+  const { busy, error, run } = useAction();
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    if (!value.trim()) return;
+    run(async () => {
+      await api("/api/team/gemini-key", { method: "PUT", body: { api_key: value.trim() } });
+      setValue("");
+      setSaved(true);
+      if (m.retry) await onRetry(m.retry, m.retry);
+    });
+  };
+  if (!canWrite) return <ErrorMsg message={`${m.message.split(". Paste")[0]}. Ask an Operator or Approver on your team to add a Gemini API key.`} />;
+  return (
+    <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 14, background: "var(--neutral-bg)", border: "1px solid var(--neutral-bd)", fontSize: 14, lineHeight: 1.45, maxWidth: 560, marginLeft: 38 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+        <Icon name="key" size={20} style={{ color: "var(--muted)" }} />
+        <span>{saved ? "Key saved. The assistant uses it from now on." : m.message}</span>
+      </div>
+      {!saved && (
+        <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input className="input" type="password" autoComplete="off" spellCheck={false} aria-label="Gemini API key" placeholder="Paste your Gemini API key" value={value} onChange={(e) => setValue(e.target.value)} style={{ flex: "1 1 220px", minWidth: 0 }} />
+            <button type="submit" className="btn-pill btn-primary" aria-disabled={busy || !value.trim()}>{busy ? "Saving…" : m.retry ? "Save and retry" : "Save key"}</button>
+          </div>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            Get one from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>. It's saved for your team and never shown again.
+          </span>
+          <ErrorLine error={error} />
+        </form>
+      )}
     </div>
   );
 }

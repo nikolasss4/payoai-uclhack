@@ -1,4 +1,6 @@
-"""The API. Every route checks team membership and role on the server. It holds no Gemini or provider key."""
+"""The API. Every route checks team membership and role on the server. It holds no Gemini or provider key.
+
+A Gemini key pasted in the app is written to the database for the agent worker, and never read back."""
 
 import asyncio
 import csv
@@ -199,6 +201,30 @@ def get_avatar(kind: str, owner_id: str, v: str = "", s: str = ""):
         raise HTTPException(404)
     headers = {"Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"}
     return Response(content=bytes(row["data"]), media_type=row["media_type"], headers=headers)
+
+
+# Gemini key
+
+
+class GeminiKey(BaseModel):
+    api_key: str
+
+
+@app.put("/api/team/gemini-key")
+def set_gemini_key(body: GeminiKey, me: Member = Depends(member)):
+    """Saves a key for the team's agent. It's write-only: no route returns it."""
+    me.require("OPERATOR", "APPROVER")
+    key = body.api_key.strip()
+    if not key or len(key) > 200 or any(c.isspace() for c in key):
+        raise HTTPException(422, "That doesn't look like an API key. Paste the whole key, with no spaces.")
+    with tx() as conn:
+        conn.execute(
+            """INSERT INTO gemini_keys (team_id, api_key, updated_by) VALUES (%s, %s, %s)
+               ON CONFLICT (team_id) DO UPDATE SET api_key = EXCLUDED.api_key, updated_by = EXCLUDED.updated_by, updated_at = now()""",
+            (me.team_id, key, me.user_id),
+        )
+        audit(conn, me.team_id, "USER", me.user_id, "GeminiKeySet", "team", me.team_id)
+    return {"saved": True}
 
 
 # Chat
