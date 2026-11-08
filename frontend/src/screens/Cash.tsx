@@ -126,7 +126,7 @@ export function Cash() {
       {!!accounts.length && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(340px,1fr))", gap: 16 }}>{accountCards}</div>}
       {latest.loading && <Skeleton height={300} count={1} radius={28} />}
       {noAnalysis}
-      {analysisCards}
+      {!!analysisCards.length && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(440px,1fr))", gap: 16 }}>{analysisCards}</div>}
       <div style={{ display: "flex", gap: 8, fontSize: 13.5, color: "var(--muted)" }}><Icon name="info" size={18} />Expected income is never counted. Only money already in the account is used.</div>
       {panel}
     </div>
@@ -198,7 +198,7 @@ function AnalysisCard({ entry, days, at, mobile, onBill }: { entry: AssetResult;
     <div className="ink-card" style={{ display: "flex", flexDirection: "column", gap: mobile ? 14 : 22, padding: mobile ? "20px 18px" : 28, borderRadius: mobile ? 26 : 28 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: mobile ? 8 : 12, flexWrap: "wrap", alignItems: mobile ? "center" : "flex-start" }}>
         {mobile ? <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "rgba(244,244,242,.6)" }}>{kicker}</span> : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: "1 1 260px", minWidth: 0 }}>
             <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "rgba(244,244,242,.6)" }}>{kicker}</span>
             <span className="display" style={{ fontSize: 30, fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.15 }}>{headline}</span>
             <span style={{ fontSize: 14, color: "rgba(244,244,242,.66)" }}>{short ? "Projected position after reserve, if every due bill is paid on its due date." : `After every bill due in the next ${days} days is paid, keeping the reserve.`}</span>
