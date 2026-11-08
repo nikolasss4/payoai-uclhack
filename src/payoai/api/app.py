@@ -1,6 +1,6 @@
 """The API. Every route checks team membership and role on the server. It holds no Gemini or provider key.
 
-A Gemini key pasted in the app is written to the database for the agent worker, and never read back."""
+A Gemini key pasted in the app is passed straight to the agent worker, which keeps it in memory. Nothing stores it."""
 
 import asyncio
 import csv
@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Reques
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from payoai.agent import chips, read_tools
+from payoai.agent import chips, read_tools, runtime_key
 from payoai.api import avatars, views
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.domain.money import DECIMALS, format_minor, to_minor
@@ -212,17 +212,13 @@ class GeminiKey(BaseModel):
 
 @app.put("/api/team/gemini-key")
 def set_gemini_key(body: GeminiKey, me: Member = Depends(member)):
-    """Saves a key for the team's agent. It's write-only: no route returns it."""
+    """Hands a key to the agent worker for this team. It's held in the worker's memory, never stored."""
     me.require("OPERATOR", "APPROVER")
     key = body.api_key.strip()
     if not key or len(key) > 200 or any(c.isspace() for c in key):
         raise HTTPException(422, "That doesn't look like an API key. Paste the whole key, with no spaces.")
     with tx() as conn:
-        conn.execute(
-            """INSERT INTO gemini_keys (team_id, api_key, updated_by) VALUES (%s, %s, %s)
-               ON CONFLICT (team_id) DO UPDATE SET api_key = EXCLUDED.api_key, updated_by = EXCLUDED.updated_by, updated_at = now()""",
-            (me.team_id, key, me.user_id),
-        )
+        runtime_key.send(conn, me.team_id, key)
         audit(conn, me.team_id, "USER", me.user_id, "GeminiKeySet", "team", me.team_id)
     return {"saved": True}
 
