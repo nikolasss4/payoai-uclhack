@@ -9,7 +9,7 @@ import json
 import os
 import secrets
 import time
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -647,7 +647,7 @@ def change_mandate(mandate_id: str, action: str, me: Member = Depends(member)):
 
 @app.get("/api/expenses")
 def expenses(status: str | None = None, me: Member = Depends(member)):
-    return read_tools.list_expenses(me.team_id, status)
+    return read_tools.all_expenses(me.team_id, status)
 
 
 EXPORT_COLUMNS = ["Expense ID", "Date", "Counterparty", "Category", "Category is a suggestion", "Business purpose", "Accounting period", "Currency", "Gross", "Net", "Tax", "GBP value", "Status", "Invoice reference", "Version"]
@@ -676,23 +676,7 @@ def export_expenses(start: date = Query(...), end: date = Query(...), status: st
     if (end - start).days > 366 * 5:
         raise HTTPException(422, "Export at most five years at a time.")
     with tx() as conn:
-        rows = fetch_all(
-            conn,
-            """
-            WITH firsts AS (
-              SELECT expense_id, MIN(created_at) AS recorded_at FROM expense_versions WHERE team_id = %s GROUP BY expense_id
-            )
-            SELECT DISTINCT ON (e.expense_id) e.*, f.recorded_at, c.display_name AS counterparty, o.invoice_reference
-            FROM expense_versions e
-            JOIN firsts f ON f.expense_id = e.expense_id
-            LEFT JOIN counterparties c ON c.id = e.counterparty_id
-            LEFT JOIN obligations o ON o.id = e.obligation_id
-            WHERE e.team_id = %s AND f.recorded_at >= %s AND f.recorded_at < %s
-            ORDER BY e.expense_id, e.version DESC
-            """,
-            (me.team_id, me.team_id, start, end + timedelta(days=1)),
-        )
-        rows = sorted((r for r in rows if not status or r["status"] == status), key=lambda r: (r["recorded_at"], r["expense_id"]))
+        rows = [r for r in read_tools.expense_rows(conn, me.team_id, start, end) if not status or r["status"] == status]
         audit(conn, me.team_id, "USER", me.user_id, "ExpensesExported", "team", me.team_id, {"start": start.isoformat(), "end": end.isoformat(), "status": status, "count": len(rows)})
     out = io.StringIO()
     writer = csv.writer(out)

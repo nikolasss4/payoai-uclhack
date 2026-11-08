@@ -19,7 +19,7 @@ def lookup(team_id: str, kind: str, record_id: str) -> dict | None:
     if kind == "bill":
         return read_tools.get_bill(team_id, record_id)
     if kind == "expense":
-        return next((e for e in read_tools.list_expenses(team_id) if e["id"] == record_id), None)
+        return read_tools.get_expense(team_id, record_id)
     if kind == "account":
         return next((a for a in read_tools.get_balances(team_id) if a["id"] == record_id), None)
     if kind == "run":

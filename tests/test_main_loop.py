@@ -4,6 +4,7 @@ import pytest
 
 from payoai.agent import chips, llm, main_loop, read_tools
 from payoai.db import fetch_all, fetch_one, new_id, tx
+from payoai.domain.money import format_minor
 from payoai.fixtures import FRAUD_IBAN, invoice_fields, render_invoice, seed_business, with_quotes
 from payoai.routines import inputs as routine_inputs
 from payoai.routines.nodes.documents import store_document
@@ -149,3 +150,36 @@ def test_multipart_requests_save_a_task_list(biz):
     turn_with(biz, script, chat_id=chat_id)
     with tx() as conn:
         assert [r["description"] for r in fetch_all(conn, "SELECT description FROM task_list_items WHERE chat_id = %s ORDER BY position", (chat_id,))] == ["Pay Alex", "Check balance"]
+
+
+def test_list_expenses_filters_by_period_and_totals_in_code(biz):
+    from datetime import date, timedelta
+
+    team_id = biz["team"]["id"]
+    today = date.today()
+    everything = read_tools.list_expenses(team_id)
+    assert everything["count"] > 1, "seed_business should record more than one expense"
+    # Move one expense back 40 days, so a recent period leaves it out.
+    old = everything["expenses"][-1]["id"]
+    with tx() as conn:
+        conn.execute("UPDATE expense_versions SET created_at = created_at - interval '40 days' WHERE team_id = %s AND expense_id = %s", (team_id, old))
+
+    recent = read_tools.list_expenses(team_id, start=(today - timedelta(days=7)).isoformat(), end=today.isoformat())
+    assert recent["count"] == everything["count"] - 1
+    assert old not in {e["id"] for e in recent["expenses"]}
+    assert all(e["recorded_on"] >= (today - timedelta(days=7)).isoformat() for e in recent["expenses"])
+
+    # Totals come from code: they match the records, per currency, and never mix currencies.
+    with tx() as conn:
+        rows = [r for r in read_tools.expense_rows(conn, team_id, today - timedelta(days=7), today) if r["gross_minor"] is not None]
+    for total in recent["totals"]:
+        expected = sum(int(r["gross_minor"]) for r in rows if r["asset"] == total["asset"])
+        assert total["gross"] == format_minor(expected, total["asset"])
+    assert len({t["asset"] for t in recent["totals"]}) == len(recent["totals"])
+
+    assert read_tools.list_expenses(team_id, start="2000-01-01", end="2000-01-31")["count"] == 0
+    assert "error" in read_tools.list_expenses(team_id, start="last month")
+    assert "error" in read_tools.list_expenses(team_id, start=today.isoformat(), end="2000-01-01")
+    # The Expenses screen and Chips still see every expense.
+    assert len(read_tools.all_expenses(team_id)) == everything["count"]
+    assert read_tools.get_expense(team_id, old)["id"] == old
