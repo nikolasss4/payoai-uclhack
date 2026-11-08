@@ -132,7 +132,10 @@ You can also leave this out and paste a key in the app. When there's no key, the
 ```bash
 SESSION_SECRET=any-long-random-string
 WEBHOOK_SECRET_SIMULATOR=another-long-random-string
+DATABASE_TX_URL=postgresql://...pooler.supabase.com:6543/postgres   # optional, Supabase only
 ```
+
+`DATABASE_TX_URL` is only for a Supabase database. Set it to your `DATABASE_URL` with port 6543 (Supabase's transaction pooler) so the API's connections don't count against the session pooler's client limit. That limit is the project's pool size (15 on the demo's project), and the API and three workers together can fill it, which makes the API fail with 500 errors. Leave it out for a local Postgres. The workers keep using `DATABASE_URL`, because the agent worker needs a full session to listen for pasted keys.
 
 **`.env.money`** (the money worker) can be left out. Its names are for payment rails that aren't built yet (Airwallex, Wise, Circle), and every payment goes through the simulator.
 
@@ -143,6 +146,12 @@ You can generate the secrets with `openssl rand -hex 32`.
 ```bash
 uv run python -m payoai.seed   # applies migrations and creates the synthetic demo company
 scripts/dev.sh                 # builds the frontend if needed, then starts the API, three workers and the test shop
+```
+
+`scripts/dev.sh` doesn't apply migrations. After pulling new code, run them before you restart it:
+
+```bash
+uv run python -m payoai.db.migrate
 ```
 
 Open http://127.0.0.1:8743 and sign in as one of the seeded users. The test shop runs on port 8793. To use other ports, set `API_PORT` and `MERCHANT_PORT`, for example `API_PORT=9100 scripts/dev.sh`. Logs are in `data/logs/`.
