@@ -183,11 +183,11 @@ export function Dashboard() {
         <button type="button" className="btn-pill btn-primary press" onClick={() => go("chat")} style={{ marginLeft: "auto", height: 48, padding: "0 20px 0 16px", fontSize: 15, fontWeight: 600, gap: 8 }}><Icon name="auto_awesome" size={20} fill />Ask PayoAI</button>
       </div>
       <ErrorLine error={balances.error} />
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "stretch" }}>
-        {hero}
-        <div style={{ flex: "1 1 280px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>{waiting}{restCards}</div>
+      {/* Two columns that stack on their own, so Approvals sits right under the balance card whatever the height of the column beside it. */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
+        <div style={{ flex: "2 1 560px", minWidth: 0, display: "grid", gap: 16 }}>{hero}{approvals}</div>
+        <div style={{ flex: "1 1 280px", minWidth: 0, display: "grid", gap: 16 }}>{waiting}{restCards}{recent}</div>
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>{approvals}{recent}</div>
     </div>
   );
 }
