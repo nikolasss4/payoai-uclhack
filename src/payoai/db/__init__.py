@@ -1,4 +1,10 @@
-"""Database access. Every connection uses the private schema, never Supabase's public one."""
+"""Database access. Every connection uses the private schema, never Supabase's public one.
+
+A process can set DATABASE_TX_URL to use Supabase's transaction pooler (port 6543) for its main pool,
+so it doesn't count against the session pooler's client limit. There a server connection is shared
+between transactions, so the schema is set inside each transaction instead of once per connection.
+Anything that needs a whole session (LISTEN, the LangGraph checkpointer, migrations) keeps DATABASE_URL.
+"""
 
 import os
 import uuid
@@ -15,7 +21,13 @@ from payoai.settings import schema
 _pool: ConnectionPool | None = None
 
 
+def transaction_pooled() -> bool:
+    return bool(os.environ.get("DATABASE_TX_URL"))
+
+
 def _configure(conn: psycopg.Connection) -> None:
+    if transaction_pooled():
+        return  # A session setting wouldn't last past this transaction. tx() sets it each time.
     conn.execute(f'SET search_path TO "{schema()}"')
     conn.commit()
 
@@ -24,7 +36,7 @@ def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
         _pool = ConnectionPool(
-            os.environ["DATABASE_URL"],
+            os.environ.get("DATABASE_TX_URL") or os.environ["DATABASE_URL"],
             min_size=1,
             max_size=int(os.environ.get("DB_POOL_SIZE", "4")),
             configure=_configure,
@@ -45,6 +57,8 @@ def close_pool() -> None:
 def tx() -> Iterator[psycopg.Connection]:
     """One transaction: commits on success and rolls back on any error."""
     with pool().connection() as conn:
+        if transaction_pooled():
+            conn.execute(f'SET LOCAL search_path TO "{schema()}"')
         yield conn
 
 
