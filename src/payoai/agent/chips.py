@@ -70,7 +70,7 @@ def check_reply(team_id: str, text: str, tool_results: list) -> list[str]:
         for kind, record_id in payments:
             record = lookup(team_id, kind, record_id)
             status = (record or {}).get("status")
-            if status not in ("CONFIRMED", "PAID"):
+            if status not in ("CONFIRMED", "PAID", "MANUALLY_RESOLVED"):
                 problems.append(f"'{sentence.strip()}' claims an outcome, but {record_id}'s status is {status}.")
     if MONEY.search(plain) and not CITATION.search(text) and tool_results:
         problems.append("The reply states money figures with no citation.")

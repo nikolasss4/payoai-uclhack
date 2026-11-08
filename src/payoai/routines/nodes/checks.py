@@ -8,11 +8,13 @@ from payoai.domain.decide import same_details
 from payoai.domain.money import format_minor, to_minor
 from payoai.providers import get_provider
 from payoai.providers.base import ProviderUnavailable
+from payoai.queue import enqueue
 from payoai.routines.nodes.common import RunState, node, question, record_check
 
 STALE_AFTER = timedelta(minutes=15)
 LIVE_STATUSES = ("REGISTERED", "NEEDS_INFORMATION", "NEEDS_REVIEW", "VERIFIED", "PAYMENT_PREPARED", "PAYMENT_IN_PROGRESS", "PAID", "OUTCOME_UNKNOWN")
 NEAR_DUPLICATE_DAYS = 35
+DEAD_INTENT = ["FAILED", "REJECTED", "CANCELLED"]
 
 
 def _normal_name(name: str) -> str:
@@ -75,8 +77,8 @@ def register_obligation(state: RunState, ctx) -> dict:
                 "INVOICE" if is_invoice else inputs.get("source_type", "REQUEST"),
                 state.get("document_id"), state.get("extraction_id"),
                 fields.get("notes") if is_invoice else ((state.get("answers") or {}).get("purpose") or inputs.get("purpose")),
-                amount, asset, _date(fields.get("due_date") or inputs.get("due_date")), reference, fields.get("period") or inputs.get("period"),
-                "BLOCKED" if live else "REGISTERED", inputs.get("mandate_id"), state.get("actor"),
+                amount, asset, _date(fields.get("due_date") or inputs.get("due_date")), reference, state.get("period") or fields.get("period") or inputs.get("period"),
+                "BLOCKED" if live else "REGISTERED", state.get("mandate_id"), state.get("actor"),
             ),
         )
     return {"obligation_id": obligation_id, "amount_minor": str(amount) if amount is not None else None, "asset": asset}
@@ -101,11 +103,27 @@ def load_registered(state: RunState, ctx) -> dict:
             """,
             (state["inputs"]["obligation_id"], state["team_id"]),
         )
-    if row is None:
-        return {"stop": "That bill wasn't found in this team."}
-    if row["status"] in ("PAID", "PAYMENT_IN_PROGRESS", "OUTCOME_UNKNOWN", "SUPERSEDED", "CANCELLED"):
-        return {"stop": f"This bill can't be prepared because its status is {row['status']}."}
+        if row is None:
+            return {"stop": "That bill wasn't found in this team."}
+        if row["status"] in ("PAID", "PAYMENT_IN_PROGRESS", "OUTCOME_UNKNOWN", "SUPERSEDED", "CANCELLED"):
+            return {"stop": f"This bill can't be prepared because its status is {row['status']}."}
+        live = fetch_one(
+            conn,
+            """
+            SELECT p.id, p.status, a.id AS approval_id, a.expires_at <= now() AS expired FROM payment_intents p
+            LEFT JOIN approvals a ON a.intent_id = p.id AND a.status = 'PENDING'
+            WHERE p.obligation_id = %s AND p.status <> ALL(%s) ORDER BY p.created_at DESC LIMIT 1
+            """,
+            (row["id"], DEAD_INTENT),
+        )
+        if live and live["status"] == "READY_FOR_APPROVAL" and live["expired"]:
+            # An approval that ran out can't be decided, so it must not hold the bill forever.
+            conn.execute("UPDATE approvals SET status = 'CANCELLED', reason = 'Expired' WHERE id = %s", (live["approval_id"],))
+            conn.execute("UPDATE payment_intents SET status = 'CANCELLED', updated_at = now() WHERE id = %s", (live["id"],))
+        elif live:
+            return {"stop": f"This bill already has a payment that is {live['status']}, so nothing new was prepared.", "intent_id": live["id"], "approval_id": None}
     return {
+        "mandate_id": row["mandate_id"], "period": row["period"],
         "obligation_id": row["id"], "counterparty_id": row["counterparty_id"], "document_id": row["document_id"],
         "extraction_id": row["extraction_id"], "fields": row["fields"] or {}, "failed_quotes": [],
         "amount_minor": str(int(row["amount_minor"])) if row["amount_minor"] is not None else None, "asset": row["asset"],
@@ -125,24 +143,32 @@ def check_duplicates(state: RunState, ctx) -> dict:
             SELECT o.*, d.sha256 FROM obligations o LEFT JOIN documents d ON d.id = o.document_id
             WHERE o.team_id = %s AND o.id <> %s AND o.status = ANY(%s)
             """,
-            (team, obligation, list(LIVE_STATUSES)),
+            (team, obligation, [*LIVE_STATUSES, "FAILED"]),
         )
     same_supplier = [o for o in others if o["counterparty_id"] == counterparty]
     reference = fields.get("invoice_number")
+    # A failed bill still holds its invoice number. Trying again goes through Replace Bill.
     exact = next((o for o in same_supplier if reference and o["invoice_reference"] == reference), None)
-    same_file = next((o for o in others if me["sha256"] and o["sha256"] == me["sha256"]), None)
+    live_supplier = [o for o in same_supplier if o["status"] in LIVE_STATUSES and not _same_mandate_other_period(me, o)]
+    same_file = next((o for o in others if me["sha256"] and o["sha256"] == me["sha256"] and o["status"] in LIVE_STATUSES), None)
     if exact:
-        results.append(record_check(state, "Check Duplicates", "DUPLICATE_INVOICE", "BLOCK", f"Invoice {reference} from this supplier is already recorded on bill {exact['id']}.", {"earlier": exact["id"]}))
+        hint = " Its payment failed, so use Replace Bill to try again." if exact["status"] == "FAILED" else ""
+        results.append(record_check(state, "Check Duplicates", "DUPLICATE_INVOICE", "BLOCK", f"Invoice {reference} from this supplier is already recorded on bill {exact['id']}.{hint}", {"earlier": exact["id"]}))
     elif same_file:
         results.append(record_check(state, "Check Duplicates", "DUPLICATE_FILE", "BLOCK", f"The same file is already recorded on bill {same_file['id']}.", {"earlier": same_file["id"]}))
     else:
         since = datetime.now(timezone.utc) - timedelta(days=NEAR_DUPLICATE_DAYS)
-        near = next((o for o in same_supplier if me["amount_minor"] is not None and o["amount_minor"] == me["amount_minor"] and (o["created_at"] >= since or (me["period"] and o["period"] == me["period"]))), None)
+        near = next((o for o in live_supplier if me["amount_minor"] is not None and o["amount_minor"] == me["amount_minor"] and (o["created_at"] >= since or (me["period"] and o["period"] == me["period"]))), None)
         if near:
             results.append(record_check(state, "Check Duplicates", "NEAR_DUPLICATE", "NEEDS_REVIEW", f"A similar payment of the same amount to this counterparty exists on {near['id']}. Repeat payments are often legitimate, so a person should check.", {"earlier": near["id"]}))
         else:
             results.append(record_check(state, "Check Duplicates", "NO_DUPLICATE", "PASS", "No matching invoice, file or recent similar payment."))
     return {"checks": results}
+
+
+def _same_mandate_other_period(me: dict, other: dict) -> bool:
+    """Each period of a Mandate is meant to repeat, so last month's payment isn't a near-duplicate of this one."""
+    return bool(me["mandate_id"]) and me["mandate_id"] == other["mandate_id"] and me["period"] != other["period"]
 
 
 @node("Check Compliance")
@@ -164,6 +190,8 @@ def check_amount(state: RunState, ctx) -> dict:
     amount = int(state["amount_minor"]) if state.get("amount_minor") else None
     if amount is None:
         return {"checks": [record_check(state, "Check Amount", "AMOUNT_MISSING", "NEEDS_INFORMATION", "The amount is unknown.")]}
+    if amount <= 0:
+        return {"checks": [record_check(state, "Check Amount", "AMOUNT_NOT_POSITIVE", "BLOCK", "A payment must be for more than zero. A credit note or refund is a separate record.")]}
     with tx() as conn:
         cp = fetch_one(conn, "SELECT * FROM counterparties WHERE id = %s", (state["counterparty_id"],))
         paid = fetch_one(conn, "SELECT count(*) AS n FROM obligations WHERE counterparty_id = %s AND status = 'PAID'", (state["counterparty_id"],))["n"]
@@ -193,6 +221,10 @@ def select_destination(state: RunState, ctx) -> dict:
             "SELECT * FROM payment_destinations WHERE team_id = %s AND counterparty_id = %s AND status = 'VERIFIED' AND asset = %s ORDER BY created_at",
             (state["team_id"], state["counterparty_id"], asset),
         )
+    # A Mandate limits the destinations: one verified later isn't covered until a new version is activated.
+    allowed = state.get("allowed_destination_ids")
+    if allowed is not None:
+        rows = [r for r in rows if r["id"] in allowed]
     if chosen:
         if any(r["id"] == chosen for r in rows):
             return {"destination_id": chosen}
@@ -226,6 +258,8 @@ def check_destination(state: RunState, ctx) -> dict:
         with tx() as conn:
             revoked = fetch_one(conn, "SELECT id FROM payment_destinations WHERE team_id = %s AND counterparty_id = %s AND status = 'REVOKED' LIMIT 1", (state["team_id"], state["counterparty_id"]))
         reason = "This counterparty's destination was revoked and there's no other verified one." if revoked else f"There's no Verified Destination that takes {state.get('asset')} for this counterparty."
+        if state.get("allowed_destination_ids") is not None:
+            reason = "None of the destinations this Mandate allows is still verified, so another one can't be used without a new Mandate version."
         return {"checks": [record_check(state, "Check Destination", "NO_VERIFIED_DESTINATION", "BLOCK", reason)]}
     with tx() as conn:
         destination = fetch_one(conn, "SELECT * FROM payment_destinations WHERE id = %s", (state["destination_id"],))
@@ -267,24 +301,6 @@ def _check_crypto(state, destination, stated) -> list[dict]:
     if stated_token and not same_details(stated_token, destination["token_contract"]):
         results.append(record_check(state, "Check Destination", "WRONG_TOKEN", "BLOCK", "The token contract on the invoice isn't the verified one. A matching symbol isn't enough."))
     return results
-
-
-@node("Select Source Account")
-def select_source_account(state: RunState, ctx) -> dict:
-    chosen = (state.get("answers") or {}).get("source_account_id") or state["inputs"].get("source_account_id")
-    with tx() as conn:
-        rows = fetch_all(conn, "SELECT * FROM financial_accounts WHERE team_id = %s AND asset = %s AND status = 'ACTIVE' ORDER BY name", (state["team_id"], state.get("asset")))
-    if chosen:
-        if any(r["id"] == chosen for r in rows):
-            return {"source_account_id": chosen}
-        return {"stop": "That source account doesn't hold this asset in this team."}
-    if len(rows) == 1:
-        return {"source_account_id": rows[0]["id"]}
-    if not rows:
-        return {"source_account_id": None}
-    if state.get("inputs", {}).get("batch"):
-        return {"source_account_id": rows[0]["id"]}
-    return question("source_account_id", "Which account should this be paid from?", [{"value": r["id"], "label": r["name"]} for r in rows])
 
 
 def refresh_balance(account: dict) -> dict | None:
@@ -349,6 +365,14 @@ def check_cash(state: RunState, ctx) -> dict:
     if not results:
         results.append(record_check(state, "Check Cash", "CASH_OK", "PASS", "The account can cover this and keep its reserve.", position))
     return {"checks": results}
+
+
+@node("Queue Cash Analysis")
+def queue_cash_analysis(state: RunState, ctx) -> dict:
+    """A newly registered bill changes the cash position. This only creates the job."""
+    with tx() as conn:
+        enqueue(conn, "cash_analysis", state["team_id"], {}, dedupe_key=f"cash:bill:{state.get('obligation_id')}")
+    return {}
 
 
 def fee_cap(rail: str) -> int:

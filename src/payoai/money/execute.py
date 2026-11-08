@@ -10,6 +10,7 @@ from psycopg.errors import UniqueViolation
 
 from payoai.db import Jsonb, fetch_one, new_id, tx
 from payoai.domain.money import payload_hash
+from payoai.money.locks import lock_obligation
 from payoai.providers import get_provider
 from payoai.providers.base import SubmitRequest, SubmitResult
 from payoai.queue import enqueue
@@ -18,16 +19,25 @@ from payoai.routines.nodes.decision import notify_approvers
 from payoai.trace import TraceContext, audit, step
 
 ROUTINE = "execute_payment"
+# A recorded attempt younger than this is taken to be still sending in another run. recover_stale
+# only requeues a job after 10 minutes, so a real crash is always older than this.
+IN_FLIGHT_GRACE = timedelta(minutes=2)
 
 
 class StopPayment(Exception):
     """A re-check failed before anything was sent. The payment needs a fresh approval."""
 
 
+class NotApprovedAnyMore(Exception):
+    """Something changed after the re-checks, such as Replace Bill. Nothing was recorded or sent."""
+
+
 def execute(team_id: str, intent_id: str, approval_id: str) -> dict:
     run_id = new_id("run")
     with tx() as conn:
         intent = fetch_one(conn, "SELECT * FROM payment_intents WHERE id = %s AND team_id = %s", (intent_id, team_id))
+        if intent is None:
+            return {"status": "STOPPED", "reason": "That payment isn't in this team."}
         conn.execute(
             "INSERT INTO routine_runs (id, team_id, routine, trigger_type, inputs, status) VALUES (%s, %s, %s, 'TAP', %s, 'RUNNING')",
             (run_id, team_id, ROUTINE, Jsonb({"intent_id": intent_id, "approval_id": approval_id})),
@@ -46,7 +56,12 @@ def execute(team_id: str, intent_id: str, approval_id: str) -> dict:
     except StopPayment as stop:
         _stop(team_id, intent, approval_id, str(stop))
         return _finish_run(run_id, {"status": "STOPPED", "reason": str(stop)})
-    attempt = _record_attempt(ctx, intent, approval_id)
+    try:
+        attempt = _record_attempt(ctx, intent, approval_id)
+    except NotApprovedAnyMore:
+        with tx() as conn:
+            exists = fetch_one(conn, "SELECT id FROM payment_attempts WHERE intent_id = %s LIMIT 1", (intent_id,))
+        return _finish_run(run_id, {"status": "ALREADY_ATTEMPTED"} if exists else {"status": "STOPPED", "reason": "This payment changed after its checks, so nothing was sent."})
     if attempt is None:
         return _finish_run(run_id, {"status": "ALREADY_ATTEMPTED"})
     with tx() as conn:
@@ -108,9 +123,20 @@ def _recheck_payment(intent) -> dict:
         raise StopPayment("A fresh balance can't be read.")
     # This payment is itself counted as approved, so add it back before comparing.
     spendable = position["spendable_minor"] + int(intent["amount_minor"])
+    # An Approver who cleared a reserve warning accepted that. Real money must still cover it.
+    if _reserve_shortfall_was_reviewed(intent):
+        spendable += position["reserve_minor"]
     if int(intent["amount_minor"]) + int(intent["max_fee_minor"]) > spendable:
         raise StopPayment("The account can no longer cover this and keep its reserve.")
     return position
+
+
+def _reserve_shortfall_was_reviewed(intent) -> bool:
+    if not intent["requires_review"]:
+        return False
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT id FROM check_results WHERE team_id = %s AND run_id = %s AND obligation_id = %s AND rule_id = ANY(%s) LIMIT 1", (intent["team_id"], intent["run_id"], intent["obligation_id"], ["CASH_BELOW_RESERVE", "BATCH_SHORTFALL"]))
+    return row is not None
 
 
 def _record_attempt(ctx, intent, approval_id) -> dict | None:
@@ -118,6 +144,23 @@ def _record_attempt(ctx, intent, approval_id) -> dict | None:
     attempt_id = new_id("att")
     try:
         with tx() as conn:
+            # The last check before money can move, in one transaction with saving the attempt. Replace
+            # Bill and Pause All Payments can't slip in between this and the send. It runs before the
+            # Trace Step opens, because a step that fails on a shared connection can't record itself.
+            lock_obligation(conn, intent["obligation_id"])
+            still_approved = fetch_one(
+                conn,
+                """
+                UPDATE payment_intents p SET status = 'SUBMITTING', updated_at = now()
+                WHERE p.id = %s AND p.status = 'APPROVED'
+                  AND EXISTS (SELECT 1 FROM approvals a WHERE a.id = %s AND a.intent_id = p.id AND a.status = 'APPROVED')
+                  AND NOT EXISTS (SELECT 1 FROM team_controls c WHERE c.team_id = p.team_id AND c.payments_paused)
+                RETURNING p.id
+                """,
+                (intent["id"], approval_id),
+            )
+            if still_approved is None:
+                raise NotApprovedAnyMore()
             with step(ctx, "NODE", "Record Attempt", {"attempt_id": attempt_id}, conn=conn):
                 conn.execute(
                     """
@@ -126,7 +169,6 @@ def _record_attempt(ctx, intent, approval_id) -> dict | None:
                     """,
                     (attempt_id, intent["team_id"], intent["id"], approval_id, intent["provider"], intent["idempotency_key"], get_provider(intent["provider"]).evidence_label),
                 )
-                conn.execute("UPDATE payment_intents SET status = 'SUBMITTING', updated_at = now() WHERE id = %s", (intent["id"],))
                 conn.execute("UPDATE obligations SET status = 'PAYMENT_IN_PROGRESS', updated_at = now() WHERE id = %s", (intent["obligation_id"],))
                 audit(conn, intent["team_id"], "SYSTEM", None, "ProviderSubmitAttempted", "payment_attempt", attempt_id, {"intent_id": intent["id"]})
     except UniqueViolation:
@@ -163,8 +205,16 @@ def _record_result(ctx, intent, attempt, result: SubmitResult) -> dict:
     }
     state, intent_status, obligation_status = mapping[result.outcome]
     with tx() as conn:
+        lock_obligation(conn, intent["obligation_id"])
+        # Only the first result counts. A second run can never overwrite a recorded outcome.
+        won = fetch_one(conn, "UPDATE payment_attempts SET state = %s, external_id = %s, updated_at = now() WHERE id = %s AND state = 'RECORDED' RETURNING id", (state, result.external_id, attempt["id"]))
+        if won is None:
+            current = fetch_one(conn, "SELECT state FROM payment_attempts WHERE id = %s", (attempt["id"],))
+            audit(conn, intent["team_id"], "SYSTEM", None, "LateSubmitResultIgnored", "payment_attempt", attempt["id"], {"outcome": result.outcome, "kept": current["state"], "external_id": result.external_id})
+            if result.external_id:
+                conn.execute("UPDATE payment_attempts SET external_id = COALESCE(external_id, %s) WHERE id = %s", (result.external_id, attempt["id"]))
+            return {"status": current["state"], "attempt_id": attempt["id"], "reason": "Another run had already recorded this attempt's outcome."}
         with step(ctx, "NODE", "Record Result", {"outcome": result.outcome}, conn=conn) as s:
-            conn.execute("UPDATE payment_attempts SET state = %s, external_id = %s, updated_at = now() WHERE id = %s", (state, result.external_id, attempt["id"]))
             conn.execute("UPDATE payment_intents SET status = %s, updated_at = now() WHERE id = %s", (intent_status, intent["id"]))
             conn.execute("UPDATE obligations SET status = %s, updated_at = now() WHERE id = %s", (obligation_status, intent["obligation_id"]))
             conn.execute(
@@ -191,19 +241,28 @@ def schedule_reconcile(conn, team_id: str, attempt_id: str, poll: int, delay_sec
 
 def _resume_existing(ctx, attempt, intent) -> dict:
     """A repeat job or restart. A saved attempt with no result may have sent money, so never resend."""
-    with step(ctx, "NODE", "Existing Attempt Found", {"attempt_id": attempt["id"], "state": attempt["state"]}) as s:
-        if attempt["state"] != "RECORDED":
+    with tx() as conn:
+        current = fetch_one(conn, "SELECT *, now() - created_at AS age FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt["id"],))
+    with step(ctx, "NODE", "Existing Attempt Found", {"attempt_id": current["id"], "state": current["state"]}) as s:
+        if current["state"] != "RECORDED":
             s.output = {"action": "none"}
-            return {"status": attempt["state"], "attempt_id": attempt["id"]}
+            return {"status": current["state"], "attempt_id": current["id"]}
+        if current["age"] < IN_FLIGHT_GRACE:
+            # Another run is most likely sending right now. Its result will be recorded, and nothing is resent.
+            s.output = {"action": "none, still in flight"}
+            return {"status": "IN_PROGRESS", "attempt_id": current["id"]}
         s.output = {"action": "marked UNKNOWN"}
-    return _record_result(ctx, intent, attempt, SubmitResult("UNKNOWN", reason="restarted with no recorded result"))
+    return _record_result(ctx, intent, current, SubmitResult("UNKNOWN", reason="restarted with no recorded result"))
 
 
 def _stop(team_id, intent, approval_id, reason) -> None:
     with tx() as conn:
+        lock_obligation(conn, intent["obligation_id"])
         conn.execute("UPDATE approvals SET status = 'CANCELLED', reason = %s WHERE id = %s AND status = 'APPROVED'", (reason, approval_id))
-        conn.execute("UPDATE payment_intents SET status = 'CANCELLED', updated_at = now() WHERE id = %s", (intent["id"],))
-        conn.execute("UPDATE obligations SET status = 'NEEDS_REVIEW', updated_at = now() WHERE id = %s", (intent["obligation_id"],))
+        # Only an approved payment stops here. A bill already replaced or cancelled must not come back to life.
+        stopped = fetch_one(conn, "UPDATE payment_intents SET status = 'CANCELLED', updated_at = now() WHERE id = %s AND status = 'APPROVED' RETURNING id", (intent["id"],))
+        if stopped:
+            conn.execute("UPDATE obligations SET status = 'NEEDS_REVIEW', updated_at = now() WHERE id = %s AND status NOT IN ('SUPERSEDED', 'CANCELLED', 'PAID')", (intent["obligation_id"],))
         audit(conn, team_id, "SYSTEM", None, "PaymentStoppedBeforeSend", "payment_intent", intent["id"], {"reason": reason})
         notify_approvers(conn, team_id, "PAYMENT_STOPPED", {"intent_id": intent["id"], "reason": reason}, f"stopped:{approval_id}")
 

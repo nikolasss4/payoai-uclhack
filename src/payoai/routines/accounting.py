@@ -1,12 +1,12 @@
 """Revise Expense, Chase Missing Document, category suggestions and manual corrections."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from payoai.agent import llm
 from payoai.db import Jsonb, fetch_one, new_id, tx
 from payoai.domain.decide import same_details
 from payoai.domain.money import format_minor, to_minor
-from payoai.memory import preferences_for
+from payoai.memory import learner, preferences_for
 from payoai.routines.nodes.common import RunState, node
 from payoai.routines.nodes.decision import notify_approvers
 from payoai.routines.nodes.documents import EXTRACTION_PROMPT, EXTRACTION_SCHEMA, verify_quotes
@@ -55,12 +55,26 @@ def revise_expense(state: RunState, ctx) -> dict:
             return {"stop": "That expense wasn't found in this team."}
         role = fetch_one(conn, "SELECT role FROM memberships WHERE team_id = %s AND user_id = %s", (team, actor))
         if current["status"] == "ACCOUNTED":
-            return {"result": _adjustment(conn, current, changes, inputs["reason"], actor)}
-        if current["status"] == "REVIEWED" and (not role or role["role"] != "APPROVER"):
-            changes["status"] = "SUPPORTED"
-            notify_approvers(conn, team, "EXPENSE_NEEDS_REVIEW", {"expense_id": current["expense_id"]}, f"expreview:{current['expense_id']}:{current['version'] + 1}")
-        added = add_version(conn, current, actor, inputs["reason"], **changes)
-    return {"result": {"expense_id": inputs["expense_id"], "version": added["version"], "status": added["status"]}}
+            result = _adjustment(conn, current, changes, inputs["reason"], actor)
+        else:
+            if current["status"] == "REVIEWED" and (not role or role["role"] != "APPROVER"):
+                changes["status"] = "SUPPORTED"
+                notify_approvers(conn, team, "EXPENSE_NEEDS_REVIEW", {"expense_id": current["expense_id"]}, f"expreview:{current['expense_id']}:{current['version'] + 1}")
+            added = add_version(conn, current, actor, inputs["reason"], **changes)
+            result = {"expense_id": inputs["expense_id"], "version": added["version"], "status": added["status"]}
+    _learn_from_correction(state, current, inputs.get("category"))
+    return {"result": result}
+
+
+def _learn_from_correction(state: RunState, current: dict, category: str | None) -> None:
+    """Only a real change to a known category counts, and a learning failure never undoes the correction."""
+    if category not in CATEGORIES or category == current["category"] or not current["counterparty_id"]:
+        return
+    try:
+        learner.observe(state["team_id"], state.get("actor"), "category_hint", current["counterparty_id"], {"category": category}, source_id=current["expense_id"])
+    except Exception as exc:  # noqa: BLE001
+        with tx() as conn:
+            audit(conn, state["team_id"], "SYSTEM", None, "MemoryObservationFailed", "expense", current["expense_id"], {"error": type(exc).__name__})
 
 
 def _adjustment(conn, current, changes, reason, actor) -> dict:
@@ -83,9 +97,11 @@ def suggest_category(team_id: str, expense_id: str) -> dict:
         if current is None or current["category"]:
             return {"skipped": True}
         cp = fetch_one(conn, "SELECT display_name, classifications FROM counterparties WHERE id = %s", (current["counterparty_id"],))
-    hints = preferences_for(team_id, None, ("category_hint",), current["counterparty_id"])
+        # An auto-learned hint applies only to the user who taught it, so it follows who started the payment.
+        owner = fetch_one(conn, "SELECT created_by FROM obligations WHERE id = %s", (current["obligation_id"],))
+    hints = [h for h in preferences_for(team_id, owner["created_by"] if owner else None, ("category_hint",), current["counterparty_id"]) if h["value"].get("category") in CATEGORIES]
     if hints:
-        category = hints[0]["value"].get("category")
+        category = hints[0]["value"]["category"]
     else:
         run_id = new_id("run")
         with tx() as conn:
@@ -113,9 +129,11 @@ def open_exception(state: RunState, ctx) -> dict:
         current = latest(conn, team, expense_id)
         if current is None:
             return {"stop": "That expense wasn't found in this team."}
+        if current["status"] != "MISSING_EVIDENCE":
+            return {"stop": f"This expense is {current['status']}, so there's no missing document to chase."}
         conn.execute(
             "INSERT INTO exceptions (id, team_id, expense_id, kind, details) VALUES (%s, %s, %s, 'MISSING_DOCUMENT', %s) ON CONFLICT DO NOTHING",
-            (new_id("exc"), team, expense_id, Jsonb({"reason": "Requested from chat"})),
+            (new_id("exc"), team, expense_id, Jsonb({"reason": "No invoice or receipt is attached to this payment."})),
         )
         notify_approvers(conn, team, "MISSING_DOCUMENT", {"expense_id": expense_id}, f"missing:{expense_id}")
         cp = fetch_one(conn, "SELECT display_name FROM counterparties WHERE id = %s", (current["counterparty_id"],))
@@ -123,13 +141,16 @@ def open_exception(state: RunState, ctx) -> dict:
     try:
         message = llm.call(
             "draft_request",
-            [llm.text_part(f"Draft a short, polite message asking {cp['display_name']} for the invoice or receipt for a payment of {format_minor(int(current['gross_minor']), current['asset'])}. The user will send it themselves.")],
+            [llm.text_part(f"Draft a short, polite message asking {cp['display_name'] if cp else 'the supplier'} for the invoice or receipt for a payment of {format_minor(int(current['gross_minor'] or 0), current['asset'])}. The user will send it themselves.")],
             ctx,
             schema=DRAFT_SCHEMA,
         ).data["message"]
     except llm.LLMFailure:
         pass
-    return {"result": {"expense_id": expense_id, "exception": "OPEN", "draft_message": message, "note": "PayoAI doesn't send this. Upload the document when it arrives."}}
+    if message:
+        with tx() as conn:
+            conn.execute("UPDATE exceptions SET details = details || %s WHERE expense_id = %s AND kind = 'MISSING_DOCUMENT' AND status = 'OPEN'", (Jsonb({"draft_message": message}), expense_id))
+    return {"result": {"expense_id": expense_id, "exception": "OPEN", "draft_message": message, "awaiting_document": True, "note": "PayoAI doesn't send this. Upload the document when it arrives."}}
 
 
 def attach_evidence(team_id: str, user_id: str, expense_id: str, document_id: str) -> dict:
@@ -141,26 +162,42 @@ def attach_evidence(team_id: str, user_id: str, expense_id: str, document_id: st
         current = latest(conn, team_id, expense_id)
         if document is None or current is None:
             raise ValueError("That document or expense isn't in this team.")
-        cp = fetch_one(conn, "SELECT display_name, legal_name FROM counterparties WHERE id = %s", (current["counterparty_id"],))
+        if current["status"] != "MISSING_EVIDENCE":
+            conn.execute("UPDATE routine_runs SET status = 'COMPLETED', updated_at = now() WHERE id = %s", (run_id,))
+            return {"status": current["status"], "differences": []}
     ctx = TraceContext(team_id, run_id=run_id)
-    fields = llm.call("extract_fields", [llm.text_part(EXTRACTION_PROMPT), llm.untrusted("receipt", document["text_content"] or "")], ctx, schema=EXTRACTION_SCHEMA, trust_label="UNTRUSTED").data
-    differences = match_to_payment(fields, current, cp)
-    failures = verify_quotes(fields, document["text_content"])
-    differences += [{"field": f["field"], "reason": f["reason"]} for f in failures]
+    try:
+        fields = llm.call("extract_fields", [llm.text_part(EXTRACTION_PROMPT), llm.untrusted("receipt", document["text_content"] or "")], ctx, schema=EXTRACTION_SCHEMA, trust_label="UNTRUSTED").data
+    except llm.LLMFailure as exc:
+        with tx() as conn:
+            conn.execute("UPDATE routine_runs SET status = 'FAILED', error = %s, updated_at = now() WHERE id = %s", (str(exc)[:500], run_id))
+        return {"status": current["status"], "differences": [], "error": "The document couldn't be read, so the expense is unchanged."}
+    failures = [{"field": f["field"], "reason": f["reason"]} for f in verify_quotes(fields, document["text_content"])]
     with tx() as conn:
-        if differences:
-            conn.execute("UPDATE exceptions SET details = details || %s WHERE expense_id = %s AND status = 'OPEN'", (Jsonb({"differences": differences, "document_id": document_id}), expense_id))
-            status = current["status"]
-        else:
-            add_version(conn, current, user_id, "Evidence attached", status="SUPPORTED")
-            conn.execute("UPDATE exceptions SET status = 'RESOLVED' WHERE expense_id = %s AND status = 'OPEN'", (expense_id,))
-            conn.execute("UPDATE obligations SET document_id = %s WHERE id = %s AND document_id IS NULL", (document_id, current["obligation_id"]))
-            status = "SUPPORTED"
-        conn.execute("UPDATE routine_runs SET status = 'COMPLETED', result = %s, updated_at = now() WHERE id = %s", (Jsonb({"status": status, "differences": differences}), run_id))
-    return {"status": status, "differences": differences}
+        outcome = apply_evidence(conn, team_id, user_id, expense_id, document_id, fields, failures)
+        conn.execute("UPDATE routine_runs SET status = 'COMPLETED', result = %s, updated_at = now() WHERE id = %s", (Jsonb(outcome), run_id))
+    return outcome
 
 
-def match_to_payment(fields: dict, expense: dict, counterparty: dict) -> list[dict]:
+def apply_evidence(conn, team_id: str, actor: str, expense_id: str, document_id: str | None, fields: dict, failures: list[dict] | None = None) -> dict:
+    """Moves an expense to SUPPORTED only if the document matches the actual payment. Later stages stay put."""
+    current = latest(conn, team_id, expense_id)
+    if current["status"] != "MISSING_EVIDENCE":
+        return {"status": current["status"], "differences": []}
+    cp = fetch_one(conn, "SELECT display_name, legal_name FROM counterparties WHERE id = %s", (current["counterparty_id"],))
+    paid_on = fetch_one(conn, "SELECT min(created_at) AS at FROM expense_versions WHERE expense_id = %s", (expense_id,))["at"]
+    differences = match_to_payment(fields, current, cp, paid_on) + (failures or [])
+    if differences:
+        conn.execute("UPDATE exceptions SET details = details || %s WHERE expense_id = %s AND status = 'OPEN'", (Jsonb({"differences": differences, "document_id": document_id}), expense_id))
+        return {"status": current["status"], "differences": differences}
+    add_version(conn, current, actor, "Evidence attached", status="SUPPORTED")
+    conn.execute("UPDATE exceptions SET status = 'RESOLVED' WHERE expense_id = %s AND status = 'OPEN'", (expense_id,))
+    conn.execute("UPDATE obligations SET document_id = %s WHERE id = %s AND document_id IS NULL", (document_id, current["obligation_id"]))
+    conn.execute("UPDATE routine_runs SET status = 'COMPLETED', updated_at = now() WHERE team_id = %s AND routine = 'chase_missing_document' AND status = 'AWAITING_DOCUMENT' AND inputs->>'expense_id' = %s", (team_id, expense_id))
+    return {"status": "SUPPORTED", "differences": []}
+
+
+def match_to_payment(fields: dict, expense: dict, counterparty: dict, paid_on: datetime | None = None) -> list[dict]:
     out = []
     asset = (fields.get("currency") or expense["asset"]).upper()
     try:
@@ -172,6 +209,14 @@ def match_to_payment(fields: dict, expense: dict, counterparty: dict) -> list[di
     supplier = fields.get("supplier_name")
     if not (same_details(supplier, counterparty["display_name"]) or same_details(supplier, counterparty["legal_name"])):
         out.append({"field": "counterparty", "document": supplier, "payment": counterparty["display_name"]})
+    paid = (paid_on or expense["created_at"]).date()
+    stated = str(fields.get("issue_date") or fields.get("supply_date") or "")[:10]
+    try:
+        close = abs(datetime.strptime(stated, "%Y-%m-%d").date() - paid) <= DATE_WINDOW
+    except ValueError:
+        close = False
+    if not close:
+        out.append({"field": "date", "document": stated or None, "payment": str(paid)})
     return out
 
 

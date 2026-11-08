@@ -2,7 +2,8 @@
 
 from langgraph.graph import END, START, StateGraph
 
-from payoai.routines.nodes import checks, decision, documents
+from payoai.routines import recurring
+from payoai.routines.nodes import checks, decision, documents, source_account
 from payoai.routines.nodes.common import RunState, ask_user
 
 
@@ -21,16 +22,18 @@ def _after(next_node: str, ask: str | None = None):
 
 def _add_checks(g: StateGraph, first_after: str, include_compliance: bool) -> None:
     """Check Duplicates through Decide. All checks run even if one fails."""
+    g.add_node("check_mandate", recurring.check_mandate)
     g.add_node("check_duplicates", checks.check_duplicates)
     g.add_node("check_amount", checks.check_amount)
     g.add_node("select_destination", checks.select_destination)
     g.add_node("ask_destination", ask_user)
     g.add_node("check_destination", checks.check_destination)
-    g.add_node("select_source_account", checks.select_source_account)
+    g.add_node("select_source_account", source_account.select_source_account)
     g.add_node("ask_source", ask_user)
     g.add_node("check_cash", checks.check_cash)
     g.add_node("decide", decision.decide)
-    g.add_edge(first_after, "check_duplicates")
+    g.add_edge(first_after, "check_mandate")
+    g.add_edge("check_mandate", "check_duplicates")
     if include_compliance:
         g.add_node("check_compliance", checks.check_compliance)
         g.add_edge("check_duplicates", "check_compliance")
@@ -52,18 +55,19 @@ def _add_finish(g: StateGraph, prepare: bool) -> None:
     g.add_node("explain", decision.explain)
 
     def after_decide(state: RunState) -> str:
-        return "investigate" if state["decision"] in ("NEEDS_REVIEW", "NEEDS_INFORMATION") else "explain"
+        return "investigate" if state["decision"] in ("NEEDS_REVIEW", "NEEDS_INFORMATION") and decision.investigate_enabled() else "explain"
 
     g.add_conditional_edges("decide", after_decide)
     g.add_edge("investigate", "explain")
     if not prepare:
-        g.add_edge("explain", END)
+        g.add_node("queue_cash_analysis", checks.queue_cash_analysis)
+        g.add_edge("explain", "queue_cash_analysis")
+        g.add_edge("queue_cash_analysis", END)
         return
     g.add_node("prepare_payment", decision.prepare_payment)
 
     def after_explain(state: RunState) -> str:
-        can_prepare = state["decision"] in ("ELIGIBLE_FOR_APPROVAL", "NEEDS_REVIEW") and state.get("destination_id") and state.get("source_account_id") and state.get("amount_minor")
-        return "prepare_payment" if can_prepare else END
+        return "prepare_payment" if decision.can_prepare(state) else END
 
     g.add_conditional_edges("explain", after_explain)
     g.add_edge("prepare_payment", END)
@@ -81,10 +85,18 @@ def _bill_graph(prepare: bool) -> StateGraph:
     g.add_conditional_edges(START, lambda s: "load_registered" if s["inputs"].get("obligation_id") else "load_document")
     g.add_conditional_edges("load_document", _after("extract_fields"))
     g.add_conditional_edges("extract_fields", _after("match_counterparty"))
-    g.add_conditional_edges("match_counterparty", _after("register_obligation", "ask_counterparty"))
+    g.add_node("match_mandate", recurring.match_mandate)
+    g.add_conditional_edges("match_counterparty", _after("match_mandate", "ask_counterparty"))
     g.add_edge("ask_counterparty", "match_counterparty")
     _add_checks(g, "register_obligation", include_compliance=True)
-    g.add_conditional_edges("load_registered", _after("check_duplicates"))
+    g.add_conditional_edges("load_registered", _after("match_mandate"))
+
+    def after_match(state: RunState) -> str:
+        if state.get("stop"):
+            return END
+        return "check_mandate" if state.get("obligation_id") else "register_obligation"
+
+    g.add_conditional_edges("match_mandate", after_match)
     _add_finish(g, prepare)
     return g
 

@@ -6,7 +6,8 @@ from payoai.agent import llm
 from payoai.compliance.rules import uk_vat
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.domain.money import format_minor, to_minor
-from payoai.routines.nodes import checks, decision
+from payoai.routines import recurring
+from payoai.routines.nodes import checks, decision, source_account
 from payoai.routines.nodes.checks import account_position, fee_cap, refresh_balance
 from payoai.routines.nodes.common import RunState, node, question, record_check
 from payoai.routines.nodes.decision import notify_approvers
@@ -39,13 +40,18 @@ def prepare_replacement(state: RunState, ctx) -> dict:
             return {"stop": "That bill wasn't found in this team."}
         if old["status"] == "PAID":
             return {"stop": "This bill has been paid, so it can't be edited in chat. Change it manually on the bill's screen."}
+        if old["status"] == "SUPERSEDED":
+            return {"stop": "This bill has already been replaced."}
+        document_id = state["inputs"].get("document_id") or old["document_id"]
+        if not document_id or not fetch_one(conn, "SELECT id FROM documents WHERE id = %s AND team_id = %s", (document_id, team)):
+            return {"stop": "This bill has no document in this team. Use Pay Someone with the right details instead."}
         intents = fetch_all(conn, "SELECT id, status FROM payment_intents WHERE obligation_id = %s", (old_id,))
         for intent in intents:
             if intent["status"] == "CONFIRMED":
                 return {"stop": "This bill has been paid, so it can't be edited in chat. Change it manually on the bill's screen."}
             if intent["status"] not in REPLACEABLE_INTENT:
                 return {"stop": f"A payment for this bill is {intent['status']}, so money may be moving. Wait for the outcome."}
-            active = fetch_one(conn, "SELECT id FROM payment_attempts WHERE intent_id = %s AND state NOT IN ('REJECTED', 'FAILED')", (intent["id"],))
+            active = fetch_one(conn, "SELECT id FROM payment_attempts WHERE intent_id = %s AND state NOT IN ('REJECTED', 'FAILED', 'MANUALLY_RESOLVED')", (intent["id"],))
             if active:
                 return {"stop": "A payment attempt exists for this bill, so wait for its outcome."}
         for intent in intents:
@@ -54,7 +60,19 @@ def prepare_replacement(state: RunState, ctx) -> dict:
                 conn.execute("UPDATE payment_intents SET status = 'CANCELLED', updated_at = now() WHERE id = %s", (intent["id"],))
         conn.execute("UPDATE obligations SET status = 'SUPERSEDED', updated_at = now() WHERE id = %s", (old_id,))
         audit(conn, team, "USER", state.get("actor"), "BillSuperseded", "obligation", old_id, {"reason": state["inputs"].get("reason")})
-    return {"document_id": state["inputs"].get("document_id") or old["document_id"], "result": {"superseded_bill": old_id}}
+    return {"document_id": document_id, "mandate_id": old["mandate_id"], "period": old["period"], "result": {"superseded_bill": old_id}}
+
+
+@node("Undo Replacement")
+def undo_replacement(state: RunState, ctx) -> dict:
+    """The new bill couldn't be read, so the old one returns for review. Its cancelled approval stays cancelled."""
+    with tx() as conn:
+        conn.execute(
+            "UPDATE obligations SET status = 'NEEDS_REVIEW', updated_at = now() WHERE id = %s AND team_id = %s AND status = 'SUPERSEDED' AND superseded_by IS NULL",
+            (state["inputs"]["obligation_id"], state["team_id"]),
+        )
+        audit(conn, state["team_id"], "SYSTEM", None, "BillReplacementUndone", "obligation", state["inputs"]["obligation_id"], {"reason": state.get("stop")})
+    return {"result": {"superseded_bill": None, "restored_bill": state["inputs"]["obligation_id"]}}
 
 
 @node("Apply Corrections")
@@ -70,6 +88,8 @@ def record_corrections(state: RunState, ctx) -> dict:
     old_id = state["inputs"]["obligation_id"]
     with tx() as conn:
         conn.execute("UPDATE obligations SET superseded_by = %s WHERE id = %s", (state["obligation_id"], old_id))
+        # The period's one claim moves to the corrected bill, so the Mandate can't prepare another.
+        conn.execute("UPDATE occurrences SET obligation_id = %s WHERE obligation_id = %s", (state["obligation_id"], old_id))
         for field, value in corrections.items():
             conn.execute(
                 "INSERT INTO field_corrections (id, team_id, obligation_id, field, new_value, is_money_field, corrected_by, reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
@@ -123,14 +143,18 @@ def prepare_batch(state: RunState, ctx) -> dict:
             # Blocked bills stay on the list with their reasons, and can't be selected for approval.
             (team, ["REGISTERED", "NEEDS_REVIEW", "NEEDS_INFORMATION", "VERIFIED", "BLOCKED"], due_from, due_from, due_to, due_to),
         )
-    items = []
+    items, attached = [], []
     for row in bills:
         item = _base_state(state, row["id"])
         item.update(checks.load_registered(item) or {})
         if item.get("stop"):
             continue
+        item.update(recurring.match_mandate(item) or {})
+        if item.get("stop"):
+            attached.append({"obligation_id": row["id"], "note": item["stop"]})
+            continue
         item["checks"] = []
-        for fn in (checks.check_duplicates, checks.check_compliance, checks.check_amount, checks.select_destination, checks.check_destination, checks.select_source_account):
+        for fn in (recurring.check_mandate, checks.check_duplicates, checks.check_compliance, checks.check_amount, checks.select_destination, checks.check_destination, source_account.select_source_account):
             out = fn(item) or {}
             item["checks"] = item["checks"] + out.pop("checks", [])
             item.update(out)
@@ -138,9 +162,13 @@ def prepare_batch(state: RunState, ctx) -> dict:
 
     by_account: dict[str, list[dict]] = {}
     for item in items:
-        if item.get("source_account_id") and item.get("amount_minor"):
+        # A bill that can't be approved here must not hold cash back from one that can.
+        cannot_pay = any(c["outcome"] in ("BLOCK", "NEEDS_INFORMATION") for c in item["checks"])
+        if cannot_pay:
+            item["checks"] = item["checks"] + [record_check(item, "Allocate Cash", "NOT_ALLOCATED", "NOT_APPLICABLE", "This bill can't be approved here, so no cash was set aside for it.")]
+        elif item.get("source_account_id") and item.get("amount_minor"):
             by_account.setdefault(item["source_account_id"], []).append(item)
-        else:
+        elif not item.get("source_account_id"):
             item["checks"] = item["checks"] + checks.check_cash({**item, "source_account_id": None})["checks"]
     for account_id, group in by_account.items():
         _allocate(state, account_id, group)
@@ -150,13 +178,52 @@ def prepare_batch(state: RunState, ctx) -> dict:
         item.update(decision.decide(item))
         if item["decision"] in ("NEEDS_REVIEW", "NEEDS_INFORMATION") and investigated < BATCH_INVESTIGATION_CAP:
             investigated += 1
-            item.update(decision.investigate(item))
-        item["explanation"] = decision.plain_list(item)
-        prepared = {}
-        if item["decision"] in ("ELIGIBLE_FOR_APPROVAL", "NEEDS_REVIEW") and item.get("destination_id") and item.get("source_account_id") and item.get("amount_minor"):
-            prepared = decision.prepare_payment(item)
-        summary.append({"obligation_id": item["obligation_id"], "decision": item["decision"], "reasons": item.get("reasons"), "intent_id": prepared.get("intent_id"), "approval_id": prepared.get("approval_id")})
-    return {"result": {"items": summary, "counts": _counts(summary)}, "approval_id": None}
+            if decision.investigate_enabled():
+                item.update(decision.investigate(item))
+            item.update(decision.explain(item))
+        else:
+            # Past the cap, or nothing to explain: the card still shows the plain reasons.
+            item["explanation"] = decision.plain_list(item)
+            with tx() as conn:
+                conn.execute("UPDATE decisions SET explanation = %s WHERE id = %s", (item["explanation"], item["decision_id"]))
+        prepared = decision.prepare_payment(item) if decision.can_prepare(item) else {}
+        summary.append({"obligation_id": item["obligation_id"], "decision": item["decision"], "reasons": item.get("reasons"), "explanation": item["explanation"], "ticked": item["decision"] == "ELIGIBLE_FOR_APPROVAL" and bool(prepared.get("approval_id")), "intent_id": prepared.get("intent_id"), "approval_id": prepared.get("approval_id")})
+    # Questions are listed together at the end, and never pause the rest of the batch.
+    questions = [{"obligation_id": s["obligation_id"], "questions": [r["reason"] for r in s["reasons"] or [] if r["outcome"] == "NEEDS_INFORMATION"]} for s in summary if any(r["outcome"] == "NEEDS_INFORMATION" for r in s["reasons"] or [])]
+    return {"result": {"items": summary, "counts": _counts(summary), "needs_information": questions, "attached": attached}, "approval_id": None}
+
+
+def recheck_selection(team_id: str, approval_ids: list[str]) -> dict:
+    """Allocate Cash again for the bills an Approver left ticked. Nothing here approves anything.
+
+    Only `fits` can go on to approval from this selection. Each still has its own approval, and cash
+    is checked again at execution.
+    """
+    with tx() as conn:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT a.id AS approval_id, p.source_account_id, p.amount_minor, p.max_fee_minor, p.obligation_id, o.due_date
+            FROM approvals a JOIN payment_intents p ON p.id = a.intent_id JOIN obligations o ON o.id = p.obligation_id
+            WHERE a.team_id = %s AND a.id = ANY(%s) AND a.status = 'PENDING'
+            """,
+            (team_id, approval_ids),
+        )
+        accounts = {r["id"]: r for r in fetch_all(conn, "SELECT * FROM financial_accounts WHERE team_id = %s", (team_id,))}
+    fits, short, unknown = [], [], []
+    for account_id in {r["source_account_id"] for r in rows}:
+        group = [r for r in rows if r["source_account_id"] == account_id]
+        snapshot = refresh_balance(accounts[account_id])
+        position = account_position(accounts[account_id], snapshot) if snapshot else None
+        if position is None or position["stale"]:
+            unknown += [r["approval_id"] for r in group]
+            continue
+        bills = [{"obligation_id": r["obligation_id"], "amount": int(r["amount_minor"]) + int(r["max_fee_minor"]), "due_date": r["due_date"], "approval_id": r["approval_id"]} for r in group]
+        good, bad = allocate_cash(bills, position["spendable_minor"])
+        fits += [b["approval_id"] for b in good]
+        short += [{"approval_id": b["approval_id"], "shortfall_minor": b["shortfall"]} for b in bad]
+    decided = sorted(set(approval_ids) - {r["approval_id"] for r in rows})
+    return {"fits": fits, "short": short, "balance_unknown": unknown, "not_pending": decided}
 
 
 def _counts(summary) -> dict:
@@ -219,6 +286,7 @@ def cash_analysis(state: RunState, ctx) -> dict:
             (team, horizon, ["REGISTERED", "NEEDS_INFORMATION", "NEEDS_REVIEW", "VERIFIED", "PAYMENT_PREPARED"]),
         )
         approved_ids = {r["obligation_id"] for r in fetch_all(conn, "SELECT obligation_id FROM payment_intents WHERE team_id = %s AND status = ANY(%s)", (team, ["APPROVED", "SUBMITTING", "SUBMITTED", "PENDING", "UNKNOWN", "NEEDS_MANUAL_REVIEW"]))}
+        bills += recurring.upcoming_due(conn, team, horizon)
     assets: dict[str, dict] = {}
     for account in accounts:
         with step(ctx, "NODE", "Refresh Balances", {"account": account["id"]}) as s:

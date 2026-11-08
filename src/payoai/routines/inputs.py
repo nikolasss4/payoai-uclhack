@@ -19,7 +19,8 @@ class Strict(BaseModel):
     @field_validator("*", mode="before")
     @classmethod
     def no_details(cls, value):
-        if isinstance(value, str) and BANK_OR_WALLET.search(value):
+        texts = [value] if isinstance(value, str) else [v for v in value.values() if isinstance(v, str)] if isinstance(value, dict) else []
+        if any(BANK_OR_WALLET.search(text) for text in texts):
             raise ValueError("Bank or wallet details can't be passed here. Add them with Add Counterparty, then verify them.")
         return value
 
@@ -75,6 +76,7 @@ class AddCounterpartyInput(BaseModel):
 class RecurringInput(Strict):
     counterparty_name: str
     max_amount: str
+    amount: str | None = None
     asset: str
     frequency: str
     day_of_period: int
@@ -150,8 +152,31 @@ def validate(routine: str, inputs: dict) -> dict:
         if asset not in DECIMALS:
             raise ValueError(f"unsupported asset {asset}")
         clean["asset"] = asset
-        clean["amount_minor"] = str(to_minor(clean.pop("amount"), asset))
+        amount = to_minor(clean.pop("amount"), asset)
+        if amount <= 0:
+            raise ValueError("A payment must be for more than zero.")
+        clean["amount_minor"] = str(amount)
+    if routine == "set_up_recurring":
+        _validate_recurring(clean)
     return clean
+
+
+def _validate_recurring(clean: dict) -> None:
+    asset = clean["asset"].upper()
+    if asset not in DECIMALS:
+        raise ValueError(f"unsupported asset {asset}")
+    clean["asset"] = asset
+    frequency = clean["frequency"].upper()
+    if frequency not in ("WEEKLY", "MONTHLY"):
+        raise ValueError("Frequency must be WEEKLY or MONTHLY.")
+    low, high = (0, 6) if frequency == "WEEKLY" else (1, 31)
+    if not low <= clean["day_of_period"] <= high:
+        raise ValueError(f"The day must be between {low} and {high} for a {frequency.lower()} payment.")
+    maximum = to_minor(clean["max_amount"], asset)
+    if maximum <= 0:
+        raise ValueError("The Mandate's maximum must be more than zero.")
+    if clean.get("amount") is not None and not 0 < to_minor(clean["amount"], asset) <= maximum:
+        raise ValueError("The regular amount must be more than zero and within the Mandate's maximum.")
 
 
 def describe(routine: str) -> dict:
