@@ -29,9 +29,13 @@ def to_minor(amount: str | int | Decimal, asset: str) -> int:
 
 
 def format_minor(amount: int | Decimal, asset: str) -> str:
+    """Shows two decimals. Extra places (USDC has six) appear only when they aren't zero, so no amount is ever rounded away."""
     places = DECIMALS.get(asset, 2)
     value = Decimal(int(amount)) / (Decimal(10) ** places)
     text = f"{value:,.{places}f}"
+    if places > 2:
+        whole, frac = text.split(".")
+        text = f"{whole}.{frac.rstrip('0').ljust(2, '0')}"
     return f"£{text}" if asset == "GBP" else f"{text} {asset}"
 
 
