@@ -16,6 +16,7 @@
   --shadow-panel: -16px 0 48px rgba(11,11,12,.14); --scrim: rgba(11,11,12,.16);
   --shadow-menu: 0 12px 32px rgba(11,11,12,.14);
   --glass: rgba(255,255,255,.86);
+  --image-outline: oklch(0 0 0 / .1);
   color-scheme: light;
 }
 [data-theme="dark"] {
@@ -32,6 +33,7 @@
   --shadow-1: none; --shadow-panel: -16px 0 48px rgba(0,0,0,.5); --scrim: rgba(0,0,0,.45);
   --shadow-menu: 0 12px 32px rgba(0,0,0,.5);
   --glass: rgba(28,28,30,.86);
+  --image-outline: oklch(1 0 0 / .1);
   color-scheme: dark;
 }
 
@@ -45,7 +47,6 @@
 html, body, #root { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
 a { color: var(--accent-text); }
-a:hover { color: var(--text); }
 button { font: inherit; color: inherit; }
 input::placeholder, textarea::placeholder { color: var(--subtle); }
 *:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
@@ -54,13 +55,26 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes panelIn { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes pageIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes panelOut { from { transform: none; opacity: 1; } to { transform: translateX(40px); opacity: 0; } }
 @keyframes blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition: none !important; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+  /* Entrances that move swap to a plain fade instead of a hard cut. */
+  .anim-rise, .anim-panel, .anim-page, .menu { animation: fadeIn .15s ease-out !important; }
+  .anim-panel-out { animation: fadeOut .15s ease-out forwards !important; }
+}
+.anim-rise { animation: rise .2s ease-out both; }
+.anim-panel { animation: panelIn .22s ease-out both; }
+.anim-panel-out { animation: panelOut .15s ease-out forwards; }
+.anim-page { animation: pageIn .2s ease-out both; }
+.anim-scrim { animation: fadeIn .15s ease-out both; }
+.anim-scrim-out { animation: fadeOut .15s ease-out forwards; }
 
 .ms { font-family: "Material Symbols Rounded"; font-weight: normal; font-style: normal; line-height: 1; letter-spacing: normal; text-transform: none; display: inline-block; white-space: nowrap; word-wrap: normal; direction: ltr; -webkit-font-feature-settings: "liga"; font-feature-settings: "liga"; -webkit-font-smoothing: antialiased; flex: none; }
-.ms-fill { font-variation-settings: "FILL" 1; }
 .spin { animation: spin 1s linear infinite; }
 .mono { font-family: var(--mono); }
 .num { font-variant-numeric: tabular-nums; }
@@ -79,28 +93,19 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 .bdg-xs .ms { font-size: 13px; }
 
 /* Buttons and pills */
-.btn-pill { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 18px; border-radius: 999px; font-size: 14px; font-weight: 500; cursor: pointer; border: 1px solid var(--border-strong); background: transparent; color: var(--text); transition: transform .15s, background .15s; }
-.btn-pill:hover { background: var(--raised); }
-.btn-pill:active { transform: scale(.97); }
+.btn-pill { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 18px; border-radius: 999px; font-size: 14px; font-weight: 500; cursor: pointer; border: 1px solid var(--border-strong); background: transparent; color: var(--text); transition-property: scale, background-color, filter; transition-duration: 150ms; transition-timing-function: ease-out; -webkit-tap-highlight-color: transparent; }
 .btn-pill[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
-.btn-pill[aria-disabled="true"]:active { transform: none; }
 .btn-primary { background: var(--primary-bg); color: var(--primary-fg); border-color: transparent; }
-.btn-primary:hover { background: var(--primary-bg); filter: brightness(1.08); }
 .btn-danger { border-color: var(--danger-bd); color: var(--danger); }
-.btn-danger:hover { background: var(--danger-bg); }
 .btn-strong { border: 1.5px solid var(--text); background: var(--surface); font-size: 15px; font-weight: 600; min-height: 50px; gap: 8px; }
 .icon-btn { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; flex: none; background: transparent; border: 0; color: inherit; }
-.icon-btn:hover { background: var(--raised); }
 .link-btn { font-size: 13.5px; font-weight: 500; cursor: pointer; min-height: 36px; display: inline-flex; align-items: center; gap: 4px; text-decoration: underline; text-underline-offset: 3px; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; }
 .kicker { font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .hoverable { cursor: pointer; }
-.hoverable:hover { background: var(--raised); }
-.hover-border:hover { border-color: var(--text) !important; }
-.menu { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-menu); padding: 6px; animation: rise .15s; }
+.menu { background: var(--surface); border: 1px solid var(--border); border-radius: 17px; overscroll-behavior: contain; box-shadow: var(--shadow-menu); padding: 6px; animation: rise .15s; }
 .menu-item { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 10px; cursor: pointer; font-size: 14px; }
-.menu-item:hover { background: var(--raised); }
 .skeleton { border-radius: 12px; background: var(--raised); animation: pulse 1.2s infinite; }
 .empty { padding: 56px 20px; border-radius: 28px; border: 1.5px dashed var(--border-strong); text-align: center; font-size: 15px; color: var(--muted); }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 500; }
@@ -111,24 +116,41 @@ select.input { padding: 0 10px; }
 .notice .ms { font-size: 20px; }
 
 /* Tables (web lists): rounded rows inside one card */
-.table, .list-card { display: flex; flex-direction: column; gap: 2px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 28px; box-shadow: var(--shadow-1); }
+.table, .list-card { display: flex; flex-direction: column; gap: 2px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 29px; box-shadow: var(--shadow-1); }
 .table-head { display: grid; gap: 12px; padding: 8px 14px 10px; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .table-row { display: grid; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 18px; cursor: pointer; transition: background .15s; }
-.table-row:hover { background: var(--bg); }
 /* Phone list rows: each a tinted pill inside the card */
-.m-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; background: var(--bg); cursor: pointer; text-align: left; border: 0; width: 100%; color: inherit; font: inherit; }
+.m-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; background: var(--bg); cursor: pointer; text-align: left; border: 0; width: 100%; color: inherit; font: inherit; -webkit-tap-highlight-color: transparent; }
 .m-row:active { background: var(--raised); }
 /* The dark and lime cards on Dashboard and Cash use fixed colours in both themes */
 .ink-card { background: #0B0B0C; color: #F4F4F2; border: 1px solid #2A2A2D; }
-.lift { transition: transform .15s, border-color .15s, box-shadow .15s; }
-.lift:hover { border-color: var(--text) !important; transform: translateY(-2px); }
-.press:active { transform: scale(.97); }
-.list-row { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.lift { transition-property: translate, border-color, box-shadow; transition-duration: 150ms; transition-timing-function: ease-out; }
+/* Press feedback: 0.96 over 150ms, never on a disabled control. */
+.press { transition-property: scale, background-color, filter; transition-duration: 150ms; transition-timing-function: ease-out; -webkit-tap-highlight-color: transparent; }
+.press:not(:disabled):not([aria-disabled="true"]):active,
+.btn-pill:not(:disabled):not([aria-disabled="true"]):active { scale: 0.96; }
+.list-row { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .list-row:last-child { border-bottom: 0; }
 .list-row:active { background: var(--raised); }
 
 .scroll-x-none { scrollbar-width: none; }
 .scroll-x-none::-webkit-scrollbar { display: none; }
 .textarea-auto { field-sizing: content; }
-.ink-chip:hover { background: rgba(244,244,242,.14) !important; }
+.img-outline { outline: 1px solid var(--image-outline); outline-offset: -1px; }
+.overlay-scroll { overscroll-behavior: contain; }
+
+/* Hover only where the pointer can hover; on touch it latches after a tap. */
+@media (hover: hover) {
+  a:hover { color: var(--text); }
+  .btn-pill:hover { background: var(--raised); }
+  .btn-primary:hover { background: var(--primary-bg); filter: brightness(1.08); }
+  .btn-danger:hover { background: var(--danger-bg); }
+  .icon-btn:hover { background: var(--raised); }
+  .hoverable:hover { background: var(--raised); }
+  .hover-border:hover { border-color: var(--text) !important; }
+  .menu-item:hover { background: var(--raised); }
+  .table-row:hover { background: var(--bg); }
+  .lift:hover { border-color: var(--text) !important; translate: 0 -2px; }
+  .ink-chip:hover { background: rgba(244,244,242,.14) !important; }
+}
 .composer:focus-within { border-color: var(--text) !important; }

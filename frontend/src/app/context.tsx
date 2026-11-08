@@ -75,7 +75,16 @@ export function useTheme() {
   const system = useMedia("(prefers-color-scheme: dark)");
   const [chosen, setChosen] = useState<string | null>(() => prefs.get("payo.theme"));
   const theme: "light" | "dark" = chosen === "dark" || chosen === "light" ? chosen : system ? "dark" : "light";
-  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  useEffect(() => {
+    // Turn every transition off for the swap, or each colour transition fires at once and the switch smears.
+    const style = document.createElement("style");
+    style.textContent = "*,*::before,*::after{transition:none!important}";
+    document.head.append(style);
+    document.documentElement.dataset.theme = theme;
+    void document.body.offsetHeight; // commit the new colours while transitions are off
+    let raf = requestAnimationFrame(() => { raf = requestAnimationFrame(() => style.remove()); });
+    return () => { cancelAnimationFrame(raf); style.remove(); };
+  }, [theme]);
   const toggle = useCallback(() => {
     const next = theme === "light" ? "dark" : "light";
     prefs.set("payo.theme", next);

@@ -180,7 +180,7 @@ export function Dashboard() {
     <div data-screen-label="Dashboard" style={{ padding: "32px 32px 64px", display: "flex", flexDirection: "column", gap: 28, maxWidth: 1180, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "flex-end", flexWrap: "wrap", gap: 16 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}><span style={{ fontSize: 14.5, color: "var(--muted)" }}>{longToday()}</span>{title}</div>
-        <button type="button" className="btn-pill btn-primary press" onClick={() => go("chat")} style={{ marginLeft: "auto", height: 48, padding: "0 20px 0 16px", fontSize: 15, fontWeight: 600, gap: 8 }}><Icon name="auto_awesome" size={20} fill />Ask PayoAI</button>
+        <button type="button" className="btn-pill btn-primary press" onClick={() => go("chat")} style={{ marginLeft: "auto", height: 48, padding: "0 20px 0 16px", fontSize: 15, fontWeight: 600, gap: 8 }}><Icon name="auto_awesome" size={20} fill weight={600} />Ask PayoAI</button>
       </div>
       <ErrorLine error={balances.error} />
       {/* Two columns that stack on their own, so Approvals sits right under the balance card whatever the height of the column beside it. */}

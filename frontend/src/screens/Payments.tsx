@@ -15,11 +15,11 @@ const TABS: [PayTab, string][] = [["payments", "Payments"], ["bills", "Bills"], 
 export function Payments() {
   const { mobile, nav, setPayTab, canWrite, requestChat } = useApp();
   const tab = nav.payTab;
-  const btn = mobile ? { height: 44, minHeight: 0, padding: "0 12px", fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap" as const } : { height: 46, minHeight: 0, padding: "0 18px 0 14px", fontSize: 14.5, fontWeight: 600, whiteSpace: "nowrap" as const };
+  const btn = mobile ? { height: 44, minHeight: 0, padding: "0 12px 0 10px", fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap" as const } : { height: 46, minHeight: 0, padding: "0 18px 0 14px", fontSize: 14.5, fontWeight: 600, whiteSpace: "nowrap" as const };
   const actions = canWrite && (
     <div style={mobile ? { display: "grid", gridAutoFlow: "column", gridAutoColumns: "minmax(0,1fr)", gap: 8 } : { marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
-      <button type="button" className="btn-pill" onClick={() => requestChat({ attach: true, draft: "Pay this bill" })} style={{ ...btn, background: "var(--surface)" }}><Icon name="upload_file" size={19} />Upload a bill</button>
-      <button type="button" className="btn-pill btn-primary press" onClick={() => requestChat({ draft: "I want to pay " })} style={btn}><Icon name="add" size={19} />Add payment</button>
+      <button type="button" className="btn-pill" onClick={() => requestChat({ attach: true, draft: "Pay this bill" })} style={{ ...btn, background: "var(--surface)" }}><Icon name="upload_file" size={19} weight={600} />Upload a bill</button>
+      <button type="button" className="btn-pill btn-primary press" onClick={() => requestChat({ draft: "I want to pay " })} style={btn}><Icon name="add" size={19} weight={600} />Add payment</button>
     </div>
   );
   const tabs = <Segments items={TABS} value={tab} onChange={setPayTab} mobile={mobile} />;
