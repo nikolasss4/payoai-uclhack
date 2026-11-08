@@ -24,6 +24,7 @@ STEPS = {
     "suggest_category": StepConfig(FLASH, "low", timeout_seconds=60),
     "draft_request": StepConfig(FLASH, "low", timeout_seconds=60),
     "purchase_research": StepConfig(FLASH, "medium", timeout_seconds=600),
+    "web_research": StepConfig(FLASH, "medium", timeout_seconds=300),
     "memory_learner": StepConfig(FLASH_LITE, "minimal", timeout_seconds=60),
     "judge": StepConfig(ARGON, "high", timeout_seconds=600),
 }

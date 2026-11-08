@@ -3,7 +3,7 @@
 from langgraph.graph import END, START, StateGraph
 
 from payoai import memory
-from payoai.routines import accounting, contacts, purchases, recurring
+from payoai.routines import accounting, contacts, purchases, recurring, web_research as research
 from payoai.routines.graphs.payment import _add_checks, _add_finish, _after
 from payoai.routines.nodes import checks, decision, documents, extra
 from payoai.routines.nodes.common import RunState, ask_user, node
@@ -122,6 +122,10 @@ def revise_expense() -> StateGraph:
 
 def chase_missing_document() -> StateGraph:
     return _single(accounting.open_exception)
+
+
+def web_research() -> StateGraph:
+    return _single(research.web_research)
 
 
 def purchase_research() -> StateGraph:

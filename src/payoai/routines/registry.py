@@ -31,7 +31,9 @@ ROUTINES = {
     "prepare_occurrence": RoutineConfig("Prepare Occurrence", False, WRITERS, others.prepare_occurrence, chat_startable=False),
     "revise_expense": RoutineConfig("Revise Expense", True, WRITERS, others.revise_expense),
     "chase_missing_document": RoutineConfig("Chase Missing Document", False, WRITERS, others.chase_missing_document),
-    "purchase_research": RoutineConfig("Purchase Research", False, WRITERS, others.purchase_research),
+    "web_research": RoutineConfig("Web Research", False, ("VIEWER", *WRITERS), others.web_research),
+    # Not offered in chat for now: Web Research covers research, and buying is out of scope.
+    "purchase_research": RoutineConfig("Purchase Research", False, WRITERS, others.purchase_research, chat_startable=False),
     "purchase_checkout": RoutineConfig("Purchase Checkout", True, WRITERS, others.purchase_checkout),
     "save_preference": RoutineConfig("Save Preference", True, WRITERS, others.save_preference),
 }
