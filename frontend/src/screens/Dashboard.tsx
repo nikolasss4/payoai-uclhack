@@ -35,7 +35,7 @@ export function Dashboard() {
 
   // The dark card: what can be spent today, and the days ahead from the latest analysis.
   const hero = (
-    <div className="ink-card" style={{ flex: mobile ? undefined : "2 1 560px", minWidth: 0, display: "flex", flexDirection: "column", gap: mobile ? 16 : 24, padding: mobile ? "20px 18px 16px" : "26px 28px 22px", borderRadius: mobile ? 26 : 28 }}>
+    <div className="ink-card" style={{ flex: mobile ? undefined : "2 1 560px", alignSelf: mobile ? undefined : "flex-start", minWidth: 0, display: "flex", flexDirection: "column", gap: mobile ? 16 : 24, padding: mobile ? "20px 18px 16px" : "26px 28px 22px", borderRadius: mobile ? 26 : 28 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: mobile ? "center" : "flex-start", gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={{ fontSize: mobile ? 13 : 14, fontWeight: 500, color: INK_MUTED }}>Spendable today{!mobile && main ? ` · ${main.name}` : ""}</span>
