@@ -1,8 +1,13 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { initials, orgInitials, type B } from "./lib";
 
-export function Icon({ name, size = 20, fill, style, className = "" }: { name: string; size?: number; fill?: boolean; style?: CSSProperties; className?: string }) {
-  return <span aria-hidden="true" className={`ms ${fill ? "ms-fill" : ""} ${className}`} style={{ fontSize: size, ...style }}>{name}</span>;
+/**
+ * A Material Symbols glyph. `weight` follows the text beside it: 400 next to regular text, 600 next to
+ * medium or semibold labels. The optical size tracks the render size so small icons use the glyph drawn for them.
+ */
+export function Icon({ name, size = 20, fill, weight = 400, style, className = "" }: { name: string; size?: number; fill?: boolean; weight?: number; style?: CSSProperties; className?: string }) {
+  const opsz = Math.min(48, Math.max(20, size));
+  return <span aria-hidden="true" className={`ms ${className}`} style={{ fontSize: size, fontVariationSettings: `"FILL" ${fill ? 1 : 0}, "wght" ${weight}, "opsz" ${opsz}`, ...style }}>{name}</span>;
 }
 
 export function Badge({ b, size = "md", icon = true, style }: { b: B; size?: "xs" | "sm" | "md" | "lg"; icon?: boolean; style?: CSSProperties }) {
@@ -117,7 +122,7 @@ export function Avatar({ name, src, size, square, ring, style }: { name?: string
   return (
     <span aria-hidden="true" style={{ position: "relative", flex: "none", width: size, height: size, borderRadius: square ? Math.round(size * 0.3) : "50%", background: square ? "var(--text)" : "var(--raised)", color: square ? "var(--bg)" : "var(--text)", display: "grid", placeItems: "center", fontSize: Math.max(10, Math.round(size * (square ? 0.37 : 0.35))), fontWeight: 600, overflow: "hidden", boxShadow: ring ? `0 0 0 2px var(--surface), 0 0 0 4px ${ring}` : undefined, ...style }}>
       {square ? orgInitials(name) : initials(name)}
-      {show && <img src={src!} alt="" onError={() => setFailed(src!)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+      {show && <img src={src!} alt="" className="img-outline" onError={() => setFailed(src!)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
     </span>
   );
 }

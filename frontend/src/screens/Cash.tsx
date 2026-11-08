@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useApp } from "../app/context";
-import { useLive } from "../hooks";
+import { useExit, useLive } from "../hooks";
 import { day, dayLabel, hm, when } from "../lib";
 import { Badge, ErrorLine, Icon, PageTitle, Skeleton, Stat } from "../ui";
 import { AccountsPanel } from "./Accounts";
@@ -24,6 +24,7 @@ export function shortfallTitle(entry: AssetResult): string {
 export function Cash() {
   const { mobile, open, isA } = useApp();
   const [managing, setManaging] = useState(false);
+  const [panelShown, panelLeaving] = useExit(managing);
   const balances = useLive<{ balances: Balance[]; alerts: any[] }>("/api/balances", 15000);
   const latest = useLive<Latest>("/api/cash/latest", 15000);
   const [analysing, setAnalysing] = useState(false);
@@ -96,7 +97,7 @@ export function Cash() {
     </div>
   );
 
-  const panel = managing && <AccountsPanel accounts={accounts} mobile={mobile} onClose={() => setManaging(false)} onChanged={() => balances.reload()} />;
+  const panel = panelShown && <AccountsPanel accounts={accounts} mobile={mobile} leaving={panelLeaving} onClose={() => setManaging(false)} onChanged={() => balances.reload()} />;
 
   if (mobile) {
     return (

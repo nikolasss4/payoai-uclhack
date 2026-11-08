@@ -7,7 +7,7 @@ import type { Balance } from "./Dashboard";
 interface Bank { id: string; name: string; available: boolean; assets: string[] }
 
 /** Add and remove the team's accounts. The banks are fictional and every account runs on the simulator. */
-export function AccountsPanel({ accounts, mobile, onClose, onChanged }: { accounts: Balance[]; mobile: boolean; onClose: () => void; onChanged: () => void }) {
+export function AccountsPanel({ accounts, mobile, leaving, onClose, onChanged }: { accounts: Balance[]; mobile: boolean; leaving?: boolean; onClose: () => void; onChanged: () => void }) {
   const banks = useLive<{ banks: Bank[] }>("/api/banks");
   const [bank, setBank] = useState<Bank | null>(null);
 
@@ -20,14 +20,14 @@ export function AccountsPanel({ accounts, mobile, onClose, onChanged }: { accoun
   const top = mobile ? 0 : 28;
   return (
     <>
-      <div onClick={onClose} style={{ position: "fixed", inset: `${top}px 0 0 0`, background: "var(--scrim)", zIndex: 50, animation: "rise .15s" }} />
-      <aside role="dialog" aria-label="Accounts" style={{ position: "fixed", top, right: 0, bottom: 0, width: mobile ? "100%" : 520, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", animation: "panelIn .22s ease-out", borderLeft: "1px solid var(--border)" }}>
+      <div onClick={onClose} className={leaving ? "anim-scrim-out" : "anim-scrim"} style={{ position: "fixed", inset: `${top}px 0 0 0`, background: "var(--scrim)", zIndex: 50, pointerEvents: leaving ? "none" : undefined }} />
+      <aside role="dialog" aria-label="Accounts" className={leaving ? "anim-panel-out" : "anim-panel"} style={{ position: "fixed", top, right: 0, bottom: 0, width: mobile ? "100%" : 520, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", pointerEvents: leaving ? "none" : undefined }}>
         <div style={{ flex: "none", height: 60, display: "flex", alignItems: "center", gap: 4, padding: "0 10px 0 6px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
           {bank && <button type="button" className="icon-btn" aria-label="Back to the bank list" onClick={() => setBank(null)}><Icon name="arrow_back" size={22} /></button>}
           <span style={{ fontSize: 15, fontWeight: 600, paddingLeft: bank ? 0 : 10 }}>{bank ? `Add a ${bank.name} account` : "Accounts"}</span>
           <button type="button" className="icon-btn" aria-label="Close" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="close" size={22} /></button>
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: mobile ? 16 : 20, display: "flex", flexDirection: "column", gap: 20 }}>
+        <div className="overlay-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: mobile ? 16 : 20, display: "flex", flexDirection: "column", gap: 20 }}>
           {bank ? (
             <ConnectForm bank={bank} onDone={() => { setBank(null); onChanged(); }} />
           ) : (

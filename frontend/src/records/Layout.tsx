@@ -6,7 +6,7 @@ import { badge, type B } from "../lib";
 export function RecordLayout({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 20px 28px", display: "flex", flexDirection: "column", gap: 20 }}>{children}</div>
+      <div className="overlay-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 20px 28px", display: "flex", flexDirection: "column", gap: 20 }}>{children}</div>
       {footer && (
         <div style={{ flex: "none", borderTop: "1px solid var(--border)", background: "var(--surface)", padding: "14px 20px 16px", display: "flex", flexDirection: "column", gap: 12, boxShadow: "0 -8px 24px rgba(11,11,12,.05)" }}>{footer}</div>
       )}

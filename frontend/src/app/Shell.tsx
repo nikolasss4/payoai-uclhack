@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useArmed, useDismiss, useAction } from "../hooks";
+import { useArmed, useDismiss, useAction, useExit } from "../hooks";
 import { ROLE_HINT, ROLE_STYLE, words } from "../lib";
 import { RecordView, TITLES } from "../records/RecordView";
 import { Audit } from "../screens/Audit";
@@ -132,6 +132,7 @@ export function WebShell() {
   const orgRef = useDismiss(menu === "org", () => setMenu(null));
   const userRef = useDismiss(menu === "user", () => setMenu(null));
   const top = nav.stack[nav.stack.length - 1];
+  const [panel, leaving] = useExit(top);
   const unread = notifications?.unread || 0;
   const bellOn = top?.kind === "notifications";
 
@@ -146,8 +147,8 @@ export function WebShell() {
             if (id === "chat") {
               return (
                 <button key={id} type="button" aria-current={active ? "page" : undefined} onClick={() => go(id)}
-                  style={{ flex: "none", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6, minHeight: 36, padding: "0 16px 0 12px", borderRadius: 999, cursor: "pointer", fontSize: 14, fontWeight: 600, background: "var(--primary-bg)", color: "var(--primary-fg)", boxShadow: active ? "0 0 0 2px var(--raised), 0 0 0 4px var(--primary-bg)" : "none", border: 0, transition: "transform .15s" }}>
-                  <Icon name="auto_awesome" size={18} fill />{label}
+                  style={{ flex: "none", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6, minHeight: 36, padding: "0 16px 0 12px", borderRadius: 999, cursor: "pointer", fontSize: 14, fontWeight: 600, background: "var(--primary-bg)", color: "var(--primary-fg)", boxShadow: active ? "0 0 0 2px var(--raised), 0 0 0 4px var(--primary-bg)" : "none", border: 0 }} className="press">
+                  <Icon name="auto_awesome" size={18} fill weight={600} />{label}
                 </button>
               );
             }
@@ -189,17 +190,17 @@ export function WebShell() {
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         <main style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", position: "relative" }}><Screen section={nav.section} /></main>
       </div>
-      {top && (
+      {panel && (
         <>
-          <div onClick={close} style={{ position: "absolute", inset: 0, background: "var(--scrim)", zIndex: 50, animation: "rise .15s" }} />
-          <aside role="dialog" aria-label={TITLES[top.kind]} style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", animation: "panelIn .22s ease-out", borderLeft: "1px solid var(--border)" }}
+          <div onClick={close} className={leaving ? "anim-scrim-out" : "anim-scrim"} style={{ position: "absolute", inset: 0, background: "var(--scrim)", zIndex: 50, pointerEvents: leaving ? "none" : undefined }} />
+          <aside role="dialog" aria-label={TITLES[panel.kind]} className={leaving ? "anim-panel-out" : "anim-panel"} style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", pointerEvents: leaving ? "none" : undefined }}
             onKeyDown={(e) => { if (e.key === "Escape") close(); }}>
             <div style={{ flex: "none", height: 60, display: "flex", alignItems: "center", gap: 8, padding: "0 10px 0 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
               {nav.stack.length > 1 && <button type="button" className="icon-btn" aria-label="Back" onClick={back}><Icon name="arrow_back" size={22} /></button>}
-              <span style={{ fontSize: 15, fontWeight: 600, paddingLeft: 6 }}>{TITLES[top.kind]}</span>
+              <span style={{ fontSize: 15, fontWeight: 600, paddingLeft: 6 }}>{TITLES[panel.kind]}</span>
               <button type="button" className="icon-btn" aria-label="Close" style={{ marginLeft: "auto" }} onClick={close}><Icon name="close" size={22} /></button>
             </div>
-            <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateRows: "minmax(0,1fr)" }}><RecordView rec={top} /></div>
+            <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateRows: "minmax(0,1fr)" }}><RecordView rec={panel} /></div>
           </aside>
         </>
       )}
@@ -227,7 +228,7 @@ export function MobileShell() {
   const unread = notifications?.unread || 0;
   const isChat = nav.section === "chat";
   const content: ReactNode = top ? (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", animation: "pageIn .2s ease-out" }}>
+    <div className="anim-page" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 4, height: 52, padding: "0 8px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
         <button type="button" onClick={back} aria-label="Back" style={{ display: "flex", alignItems: "center", gap: 2, height: 44, padding: "0 10px 0 4px", borderRadius: 999, cursor: "pointer", fontSize: 15, fontWeight: 500, background: "transparent", border: 0 }}><Icon name="chevron_left" size={24} />Back</button>
         <span style={{ flex: 1, textAlign: "center", fontSize: 15, fontWeight: 600, paddingRight: 72 }}>{TITLES[top.kind]}</span>
@@ -271,7 +272,7 @@ export function MobileShell() {
             <NavItem id="payments" label="Payments" icon="payments" active={nav.section === "payments"} onClick={() => go("payments")} />
             <div style={{ display: "grid", placeItems: "center" }}>
               <button type="button" aria-label="Agent" aria-current={isChat ? "page" : undefined} onClick={() => go("chat")}
-                style={{ width: 54, height: 54, borderRadius: "50%", display: "grid", placeItems: "center", cursor: "pointer", background: "var(--primary-bg)", color: "var(--primary-fg)", boxShadow: isChat ? "0 0 0 3px var(--bg), 0 0 0 5px var(--text)" : "0 6px 20px rgba(212,245,60,.25)", transition: "transform .15s", border: 0 }}>
+                style={{ width: 54, height: 54, borderRadius: "50%", display: "grid", placeItems: "center", cursor: "pointer", background: "var(--primary-bg)", color: "var(--primary-fg)", boxShadow: isChat ? "0 0 0 3px var(--bg), 0 0 0 5px var(--text)" : "0 6px 20px rgba(212,245,60,.25)", border: 0 }} className="press">
                 <Icon name="auto_awesome" size={26} fill />
               </button>
             </div>

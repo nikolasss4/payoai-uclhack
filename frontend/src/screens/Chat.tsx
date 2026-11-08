@@ -3,7 +3,7 @@ import { ACCEPT, api, prefs, upload } from "../api";
 import { rememberChat, rememberedChat, useApp } from "../app/context";
 import { Messages } from "../chat/Messages";
 import { useChat, type ChatRow, type Outgoing } from "../chat/useChat";
-import { useDismiss, useLive } from "../hooks";
+import { useDismiss, useExit, useLive } from "../hooks";
 import { dayLabel, fileIcon, fileKind, fileSize } from "../lib";
 import { ErrorLine, Icon } from "../ui";
 import { MemoryList, useMemories } from "./Memory";
@@ -27,6 +27,7 @@ export function ChatScreen() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [memOpen, setMemOpen] = useState(false);
+  const [memShown, memLeaving] = useExit(memOpen);
   // The web sidebar folds to a rail of icons. Each viewer's choice is remembered on this device.
   const [sideOpen, setSideOpenState] = useState(() => prefs.get("payo.chatSidebar") === "open");
   const setSideOpen = (open: boolean) => { setSideOpenState(open); prefs.set("payo.chatSidebar", open ? "open" : "closed"); };
@@ -135,7 +136,7 @@ export function ChatScreen() {
                 <h2 className="display" style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>Memory</h2>
                 <button type="button" className="icon-btn" aria-label="Close memory" onClick={() => setMemOpen(false)}><Icon name="close" size={22} /></button>
               </div>
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}><MemoryList mobile /></div>
+              <div className="overlay-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}><MemoryList mobile /></div>
             </aside>
           </>
         )}
@@ -152,7 +153,7 @@ export function ChatScreen() {
       {sideOpen ? (
         <aside aria-label="Chats" style={{ flex: "none", width: 300, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 12, padding: "16px 14px", overflowY: "auto", animation: "rise .18s" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button type="button" className="press" onClick={newChat} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 48, borderRadius: 999, background: "var(--accent)", color: "#0B0B0C", fontSize: 16, fontWeight: 600, cursor: "pointer", border: 0 }}><Icon name="add" size={22} />New chat</button>
+            <button type="button" className="press" onClick={newChat} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 48, borderRadius: 999, background: "var(--accent)", color: "#0B0B0C", fontSize: 16, fontWeight: 600, cursor: "pointer", border: 0 }}><Icon name="add" size={22} weight={600} />New chat</button>
             <RailBtn icon="left_panel_close" label="Close sidebar" onClick={() => setSideOpen(false)} />
           </div>
           <button type="button" className="hoverable" onClick={() => setMemOpen(true)}
@@ -186,7 +187,7 @@ export function ChatScreen() {
         </div>
         {composer}
       </section>
-      {memOpen && <MemoryPanel onClose={() => setMemOpen(false)} />}
+      {memShown && <MemoryPanel leaving={memLeaving} onClose={() => setMemOpen(false)} />}
     </div>
   );
 }
@@ -200,7 +201,7 @@ function RailBtn({ icon, label, onClick, active }: { icon: string; label: string
   );
 }
 
-function MemoryPanel({ onClose }: { onClose: () => void }) {
+function MemoryPanel({ leaving, onClose }: { leaving?: boolean; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
@@ -208,13 +209,13 @@ function MemoryPanel({ onClose }: { onClose: () => void }) {
   }, [onClose]);
   return (
     <>
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--scrim)", zIndex: 50, animation: "rise .15s" }} />
-      <aside role="dialog" aria-label="Memory" style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", animation: "panelIn .22s ease-out", borderLeft: "1px solid var(--border)" }}>
+      <div onClick={onClose} className={leaving ? "anim-scrim-out" : "anim-scrim"} style={{ position: "fixed", inset: 0, background: "var(--scrim)", zIndex: 50, pointerEvents: leaving ? "none" : undefined }} />
+      <aside role="dialog" aria-label="Memory" className={leaving ? "anim-panel-out" : "anim-panel"} style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 560, maxWidth: "100%", zIndex: 51, background: "var(--bg)", boxShadow: "var(--shadow-panel)", display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", pointerEvents: leaving ? "none" : undefined }}>
         <div style={{ flex: "none", height: 60, display: "flex", alignItems: "center", gap: 8, padding: "0 10px 0 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
           <span style={{ fontSize: 15, fontWeight: 600, paddingLeft: 6 }}>Memory</span>
           <button type="button" className="icon-btn" aria-label="Close" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="close" size={22} /></button>
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}><MemoryList /></div>
+        <div className="overlay-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}><MemoryList /></div>
       </aside>
     </>
   );
@@ -287,7 +288,7 @@ function MobileChatBar({ title, chats, active, onPick, onNew, onMemory }: { titl
         <span style={{ fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
         <Icon name="expand_more" size={20} style={{ color: "var(--muted)" }} />
       </button>
-      <button type="button" className="btn-pill" onClick={onNew} style={{ height: 44, padding: "0 12px", fontSize: 13.5, gap: 4 }}><Icon name="add" size={18} />New chat</button>
+      <button type="button" className="btn-pill" onClick={onNew} style={{ height: 44, padding: "0 12px 0 10px", fontSize: 13.5, gap: 4 }}><Icon name="add" size={18} />New chat</button>
       {open && (
         <div className="menu" style={{ position: "absolute", left: 8, right: 8, top: 54, zIndex: 30, boxShadow: "0 12px 32px rgba(11,11,12,.18)", maxHeight: 360, overflowY: "auto" }}>
           {!chats.length && <div style={{ padding: "10px 12px", fontSize: 13.5, color: "var(--muted)" }}>No past chats yet.</div>}

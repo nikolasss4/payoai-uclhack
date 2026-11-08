@@ -111,3 +111,18 @@ export function useArmed(ms = 5000) {
   }, [armed, ms]);
   return { armed, arm: () => setArmed(true), disarm: () => setArmed(false) };
 }
+
+/**
+ * Keeps the last open value mounted for `ms` after it closes, so an overlay can play its exit.
+ * Returns what to render and whether it is on its way out.
+ */
+export function useExit<T>(value: T | null | undefined | false, ms = 150): [T | null, boolean] {
+  const [kept, setKept] = useState<T | null>(value || null);
+  const open = !!value;
+  useEffect(() => {
+    if (open) { setKept(value as T); return; }
+    const t = setTimeout(() => setKept(null), ms);
+    return () => clearTimeout(t);
+  }, [open, value, ms]);
+  return [open ? (value as T) : kept, !open && kept !== null];
+}
