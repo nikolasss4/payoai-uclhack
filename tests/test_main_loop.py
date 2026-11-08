@@ -5,7 +5,7 @@ import pytest
 from payoai.agent import chips, llm, main_loop, read_tools
 from payoai.db import fetch_all, fetch_one, new_id, tx
 from payoai.fixtures import FRAUD_IBAN, invoice_fields, render_invoice, seed_business, with_quotes
-from payoai.routines import inputs as routine_inputs
+from payoai.routines import inputs as routine_inputs, web_research
 from payoai.routines.nodes.documents import store_document
 
 
@@ -47,6 +47,7 @@ def reset():
     yield
     main_loop.set_fake_model(None)
     llm.set_fake(None)
+    web_research.set_fake_research(None)
 
 
 def turn_with(biz, script, text="hi", role="OPERATOR", chat_id=None):
@@ -149,3 +150,20 @@ def test_multipart_requests_save_a_task_list(biz):
     turn_with(biz, script, chat_id=chat_id)
     with tx() as conn:
         assert [r["description"] for r in fetch_all(conn, "SELECT description FROM task_list_items WHERE chat_id = %s ORDER BY position", (chat_id,))] == ["Pay Alex", "Check balance"]
+
+
+def test_web_research_streams_progress_and_reaches_the_model_as_data(biz):
+    def fake(request, progress):
+        progress("Searching: plumber London")
+        progress("Reading: a.test")
+        return {"findings": [{"title": "Acme Plumbing", "detail": "Camden", "url": "https://a.test/p", "quote": "Emergency plumber in Camden"}]}, {"https://a.test/p": "Emergency plumber in Camden"}
+
+    web_research.set_fake_research(fake)
+    chat_id = new_id("chat")
+    script = Script(("start_routine", {"routine": "web_research", "inputs": {"request": "plumber in London"}}), "Found one on the web.")
+    turn_with(biz, script, chat_id=chat_id)
+    with tx() as conn:
+        rows = [r["payload"].get("node") for r in fetch_all(conn, "SELECT payload FROM chat_events WHERE chat_id = %s AND kind = 'STATUS' ORDER BY id", (chat_id,))]
+    assert rows[:3] == ["Web Research", "Searching: plumber London", "Reading: a.test"]
+    seen = str(script.inputs[1])
+    assert "untrusted_data" in seen and "Acme Plumbing" in seen
