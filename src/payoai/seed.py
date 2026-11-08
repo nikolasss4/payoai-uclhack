@@ -4,6 +4,9 @@ from payoai.settings import load_env
 
 load_env(".env.shared")
 
+from pathlib import Path  # noqa: E402
+
+from payoai.api import avatars  # noqa: E402
 from payoai.db import fetch_one, tx  # noqa: E402
 from payoai.db.migrate import migrate  # noqa: E402
 from payoai.fixtures import seed_business  # noqa: E402
@@ -17,11 +20,29 @@ USERS = [
 ]
 
 
+# Profile pictures for the demo. The portraits are from randomuser.me, as in the design.
+# The logo was made for this synthetic company. A picture someone uploaded is never replaced.
+PICTURES = Path(__file__).parent / "demo_avatars"
+DEMO_PICTURES = [("user", "user_priya", "priya.jpg"), ("user", "user_sam", "sam.jpg"), ("user", "user_jo", "jo.jpg"), ("user", "user_lee", "lee.jpg"), ("team", TEAM, "northwind.png")]
+
+
+def seed_pictures() -> int:
+    added = 0
+    with tx() as conn:
+        for kind, owner_id, name in DEMO_PICTURES:
+            if fetch_one(conn, "SELECT 1 AS ok FROM avatars WHERE owner_kind = %s AND owner_id = %s", (kind, owner_id)):
+                continue
+            avatars.save(conn, kind, owner_id, (PICTURES / name).read_bytes(), "user_sam")
+            added += 1
+    return added
+
+
 def main() -> None:
     print("migrations:", migrate() or "nothing new")
     with tx() as conn:
         if fetch_one(conn, "SELECT id FROM teams WHERE id = %s", (TEAM,)):
             print("demo team already exists")
+            print("profile pictures added:", seed_pictures())
             return
         conn.execute("INSERT INTO teams (id, name) VALUES (%s, 'Northwind Studio Ltd (synthetic)')", (TEAM,))
         conn.execute("INSERT INTO team_controls (team_id) VALUES (%s)", (TEAM,))
@@ -31,6 +52,7 @@ def main() -> None:
         conn.execute("INSERT INTO users (id, name, email) VALUES ('user_dev', 'Dev', 'dev@payoai.example')")
         conn.execute("INSERT INTO platform_roles (user_id, role) VALUES ('user_dev', 'DEVELOPER')")
     seed_business(TEAM, "user_sam")
+    print("profile pictures added:", seed_pictures())
     print("demo team created")
 
 

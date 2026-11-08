@@ -131,3 +131,4 @@ select.input { padding: 0 10px; }
 .scroll-x-none::-webkit-scrollbar { display: none; }
 .textarea-auto { field-sizing: content; }
 .ink-chip:hover { background: rgba(244,244,242,.14) !important; }
+.composer:focus-within { border-color: var(--text) !important; }
