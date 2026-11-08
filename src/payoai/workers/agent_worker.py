@@ -4,6 +4,8 @@ from payoai.settings import load_env
 
 load_env(".env.shared", ".env.agent")
 
+import os  # noqa: E402
+
 from payoai.agent import main_loop  # noqa: E402
 from payoai.db import tx  # noqa: E402
 from payoai.memory import learner  # noqa: E402
@@ -65,4 +67,5 @@ HANDLERS = {
 }
 
 if __name__ == "__main__":
-    run_forever("agent-worker", HANDLERS)
+    # Two slots fit the default pool of 4, since a job holds at most two connections at once.
+    run_forever("agent-worker", HANDLERS, concurrency=int(os.environ.get("AGENT_CONCURRENCY", "2")))

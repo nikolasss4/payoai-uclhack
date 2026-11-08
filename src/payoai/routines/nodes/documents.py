@@ -1,8 +1,11 @@
 """Load Document and Extract Fields."""
 
 import hashlib
+import mimetypes
 import re
+import zipfile
 from io import BytesIO
+from xml.etree import ElementTree
 from pathlib import Path
 
 from payoai.agent import llm
@@ -11,6 +14,14 @@ from payoai.routines.nodes.common import RunState, node
 from payoai.settings import ROOT
 
 STORE = ROOT / "data" / "documents"
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+SVG = "image/svg+xml"
+# Gemini reads these images as they are. Any other image is converted to PNG first.
+NATIVE_IMAGES = {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}
+ALIASES = {"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg", "image/x-png": "image/png", "application/x-pdf": "application/pdf"}
+for _ext, _type in ((".heic", "image/heic"), (".heif", "image/heif"), (".webp", "image/webp"), (".avif", "image/avif"), (".docx", DOCX)):
+    mimetypes.add_type(_type, _ext)
 
 STRING = {"type": ["string", "null"]}
 LINE_ITEM = {
@@ -53,6 +64,21 @@ EXTRACTION_PROMPT = (
 )
 # Fields whose quote must be verifiable before they can be trusted.
 CHECKED_QUOTES = ("supplier_name", "invoice_number", "total", "due_date", "wallet_address", "iban", "account_number", "token_contract")
+TRANSCRIBE_PROMPT = (
+    "Transcribe all the text in this document exactly as printed, line by line, keeping table rows on one line. "
+    "Output only the text. Don't summarise, correct or add anything."
+)
+
+
+def media_type_of(filename: str, content_type: str | None) -> str | None:
+    """The type to store an upload as, or None when it isn't a PDF, Word document, text file or image."""
+    media_type = (content_type or "").split(";")[0].strip().lower()
+    if media_type in ("", "application/octet-stream", "binary/octet-stream"):
+        media_type = mimetypes.guess_type(filename)[0] or ""
+    media_type = ALIASES.get(media_type, media_type)
+    if media_type in ("application/pdf", DOCX) or media_type.startswith(("text/", "image/")):
+        return media_type
+    return None
 
 
 def store_document(team_id: str, filename: str, media_type: str, data: bytes, uploaded_by: str | None) -> str:
@@ -73,12 +99,58 @@ def store_document(team_id: str, filename: str, media_type: str, data: bytes, up
 
 
 def _text_of(media_type: str, data: bytes) -> str | None:
+    """The document's text. Raises ValueError when the file is damaged or not what its type says."""
     if media_type == "application/pdf":
         from pypdf import PdfReader
+        from pypdf.errors import PyPdfError
 
-        return "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(data)).pages)
-    if media_type.startswith("text/"):
+        try:
+            return "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(data)).pages)
+        except PyPdfError as exc:
+            raise ValueError("That PDF can't be opened.") from exc
+    if media_type == DOCX:
+        return _docx_text(data)
+    if media_type.startswith("text/") or media_type == SVG:
         return data.decode("utf-8", errors="replace")
+    if media_type.startswith("image/") and media_type not in NATIVE_IMAGES:
+        _to_png(data)
+    return None
+
+
+def _docx_text(data: bytes) -> str:
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            root = ElementTree.fromstring(archive.read("word/document.xml"))
+    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as exc:
+        raise ValueError("That Word document can't be opened.") from exc
+    lines = []
+    for paragraph in root.iter(f"{w}p"):
+        lines.append("".join((el.text or "") if el.tag == f"{w}t" else "\t" for el in paragraph.iter() if el.tag in (f"{w}t", f"{w}tab")))
+    return "\n".join(lines)
+
+
+def _to_png(data: bytes) -> bytes:
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        image = Image.open(BytesIO(data))
+        image.seek(0)
+        out = BytesIO()
+        image.convert("RGBA" if "A" in image.getbands() or image.mode == "P" else "RGB").save(out, "PNG")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("That image can't be opened.") from exc
+    return out.getvalue()
+
+
+def _visual_part(media_type: str, data: bytes) -> dict | None:
+    """PDFs and images go to the model as they look, so layout and scans are read too."""
+    if media_type == "application/pdf":
+        return llm.pdf_part(data)
+    if media_type in NATIVE_IMAGES:
+        return llm.image_part(data, media_type)
+    if media_type.startswith("image/") and media_type != SVG:
+        return llm.image_part(_to_png(data), "image/png")
     return None
 
 
@@ -103,6 +175,20 @@ def verify_quotes(fields: dict, text: str | None) -> list[dict]:
         elif name != "due_date" and _normal(str(value)).replace(",", "") not in _normal(quote).replace(",", ""):
             failures.append({"field": name, "reason": "the quote doesn't contain the extracted value"})
     return failures
+
+
+def document_text(row: dict, ctx) -> str | None:
+    """The document's text. Images and scanned PDFs have no text layer, so they're transcribed the first time
+    they're read. The transcription is what extracted quotes are checked against."""
+    if (row["text_content"] or "").strip():
+        return row["text_content"]
+    visual = _visual_part(row["media_type"], Path(row["storage_path"]).read_bytes())
+    if visual is None:
+        return None
+    text = llm.call("transcribe_document", [visual, llm.text_part(TRANSCRIBE_PROMPT)], ctx, trust_label="UNTRUSTED").text
+    with tx() as conn:
+        conn.execute("UPDATE documents SET text_content = %s WHERE id = %s", (text, row["id"]))
+    return text
 
 
 @node("Load Document")
@@ -158,18 +244,23 @@ def load_bill_document(state: RunState, ctx) -> dict:
 def extract_fields(state: RunState, ctx) -> dict:
     with tx() as conn:
         row = fetch_one(conn, "SELECT * FROM documents WHERE id = %s AND team_id = %s", (state["document_id"], state["team_id"]))
+    visual = _visual_part(row["media_type"], Path(row["storage_path"]).read_bytes())
+    try:
+        text = document_text(row, ctx)
+    except llm.LLMFailure as exc:
+        return {"stop": f"Couldn't read this document: {exc}"}
+    if text is None:
+        return {"stop": "This document has no text to read."}
     parts = [llm.text_part(EXTRACTION_PROMPT)]
-    if row["media_type"] == "application/pdf":
-        parts.insert(0, llm.pdf_part(Path(row["storage_path"]).read_bytes()))
-    elif row["text_content"]:
-        parts.append(llm.untrusted("invoice", row["text_content"]))
+    if visual is not None:
+        parts.insert(0, visual)
     else:
-        return {"stop": "This file type can't be read."}
+        parts.append(llm.untrusted("invoice", text))
     try:
         fields = llm.call("extract_fields", parts, ctx, schema=EXTRACTION_SCHEMA, trust_label="UNTRUSTED").data
     except llm.LLMFailure as exc:
         return {"stop": f"Couldn't process this invoice: {exc}"}
-    failures = verify_quotes(fields, row["text_content"])
+    failures = verify_quotes(fields, text)
     extraction_id = new_id("ext")
     with tx() as conn:
         conn.execute(

@@ -10,11 +10,11 @@ The UCL AgentVerse 2026 builder guide provides Gemini API credits and recommends
 
 | LLM step | Model | Thinking level |
 |---|---|---|
-| Main Loop | `gemini-4-argon` | `medium` |
-| Extract Fields | `gemini-4-argon` | `medium` |
-| Investigate | `gemini-4-argon` | `high` |
+| Main Loop | `gemini-3.8-flash` | `low` |
+| Extract Fields | `gemini-3.8-flash` | `medium` |
+| Investigate | `gemini-3.8-flash` | `high` |
 | Explain | `gemini-3.8-flash` | `low` |
-| Purchase Research | `gemini-4-argon` | `medium` |
+| Purchase Research | `gemini-3.8-flash` | `medium` |
 | Auto Mode learner | `gemini-3.5-flash-lite` | `minimal` |
 | LLM judge | `gemini-4-argon` | `high` |
 

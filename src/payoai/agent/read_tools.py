@@ -80,7 +80,7 @@ def get_balances(team_id: str) -> list[dict]:
     """The last saved balance per account, with its age. Cash Analysis fetches fresh ones."""
     out = []
     with tx() as conn:
-        accounts = fetch_all(conn, "SELECT * FROM financial_accounts WHERE team_id = %s", (team_id,))
+        accounts = fetch_all(conn, "SELECT * FROM financial_accounts WHERE team_id = %s AND status = 'ACTIVE' ORDER BY name", (team_id,))
         snapshots = {a["id"]: fetch_one(conn, "SELECT * FROM balance_snapshots WHERE account_id = %s ORDER BY as_of DESC LIMIT 1", (a["id"],)) for a in accounts}
     for a in accounts:
         snapshot = snapshots[a["id"]]
@@ -126,11 +126,20 @@ def get_compliance_rules(team_id: str) -> dict:
     return {"ruleset": uk_vat.RULESET_VERSION, "source": uk_vat.SOURCE, "scope": "UK domestic full and simplified VAT invoices, and suppliers not registered for VAT. Everything else isn't checked.", "required_full_vat_fields": list(uk_vat.FULL_VAT_FIELDS.values()), "simplified_limit": "£250 including VAT"}
 
 
-def read_document(team_id: str, document_id: str) -> dict | None:
+def read_document(team_id: str, document_id: str, ctx=None) -> dict | None:
     """Returns untrusted text. Reading one is what makes a Main Loop context untrusted."""
+    from payoai.agent import llm
+    from payoai.routines.nodes.documents import document_text
+
     with tx() as conn:
-        row = fetch_one(conn, "SELECT id, filename, text_content FROM documents WHERE id = %s AND team_id = %s", (document_id, team_id))
-    return row and {"id": row["id"], "filename": row["filename"], "untrusted_text": row["text_content"]}
+        row = fetch_one(conn, "SELECT id, filename, media_type, storage_path, text_content FROM documents WHERE id = %s AND team_id = %s", (document_id, team_id))
+    if row is None:
+        return None
+    try:
+        text = document_text(row, ctx)
+    except llm.LLMFailure:
+        return {"id": row["id"], "filename": row["filename"], "error": "couldn't read the document's text"}
+    return {"id": row["id"], "filename": row["filename"], "untrusted_text": text}
 
 
 def s(description: str, **props) -> dict:

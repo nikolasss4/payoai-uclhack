@@ -42,7 +42,7 @@ Where this plan and those documents overlap, those documents hold the detail.
 | Crypto | Simulated only | `web3.py` isn't a dependency, and nothing is signed or broadcast |
 | PDF text | `pypdf` | Lets code confirm that extraction quotes appear in the document |
 | Scripted checkout | Fixed HTTP calls with `httpx` against the test shop | Playwright isn't used, because the test shop is the only supported merchant |
-| Frontend | Plain static HTML and JavaScript in `web/`, served by the API | Next.js isn't used, pending the user's design |
+| Frontend | React and TypeScript in `frontend/`, built with Vite into `web/dist` and served by the API. Web and mobile layouts from the v2 designs | Next.js isn't used. There's no server rendering, so the API stays the only server |
 | Tests | `pytest` | |
 
 ## 3. Infrastructure

@@ -22,3 +22,6 @@ node_modules/
 .DS_Store
 evals/results/
 .claude/
+
+# Built frontend (cd frontend && npm run build)
+web/dist/

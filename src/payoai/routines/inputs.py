@@ -24,6 +24,14 @@ class Strict(BaseModel):
             raise ValueError("Bank or wallet details can't be passed here. Add them with Add Counterparty, then verify them.")
         return value
 
+    @field_validator("amount", "max_amount", "budget", mode="before", check_fields=False)
+    @classmethod
+    def number_to_text(cls, value):
+        # Models often send 50 rather than "50". Code still parses and checks the amount later.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        return value
+
 
 class BillInput(Strict):
     document_id: str | None = None
