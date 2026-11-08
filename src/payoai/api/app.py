@@ -1,16 +1,20 @@
 """The API. Every route checks team membership and role on the server. It holds no Gemini or provider key."""
 
 import asyncio
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
 import time
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from payoai.agent import chips, read_tools
@@ -644,6 +648,65 @@ def change_mandate(mandate_id: str, action: str, me: Member = Depends(member)):
 @app.get("/api/expenses")
 def expenses(status: str | None = None, me: Member = Depends(member)):
     return read_tools.list_expenses(me.team_id, status)
+
+
+EXPORT_COLUMNS = ["Expense ID", "Date", "Counterparty", "Category", "Category is a suggestion", "Business purpose", "Accounting period", "Currency", "Gross", "Net", "Tax", "GBP value", "Status", "Invoice reference", "Version"]
+
+
+def _plain(minor, asset) -> str:
+    """An amount a spreadsheet can add up: no symbol, no thousands separators."""
+    if minor is None or not asset:
+        return ""
+    places = DECIMALS.get(asset, 2)
+    return f"{Decimal(int(minor)) / (Decimal(10) ** places):.{places}f}"
+
+
+def _cell(value) -> str:
+    """Text from bills is untrusted, so a spreadsheet must not run it as a formula."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+# Declared before /api/expenses/{expense_id} so "export" isn't read as an ID.
+@app.get("/api/expenses/export")
+def export_expenses(start: date = Query(...), end: date = Query(...), status: str | None = None, me: Member = Depends(member)):
+    """A CSV of every expense recorded between start and end, both inclusive (UTC days), in its latest version."""
+    if end < start:
+        raise HTTPException(422, "The end date is before the start date.")
+    if (end - start).days > 366 * 5:
+        raise HTTPException(422, "Export at most five years at a time.")
+    with tx() as conn:
+        rows = fetch_all(
+            conn,
+            """
+            WITH firsts AS (
+              SELECT expense_id, MIN(created_at) AS recorded_at FROM expense_versions WHERE team_id = %s GROUP BY expense_id
+            )
+            SELECT DISTINCT ON (e.expense_id) e.*, f.recorded_at, c.display_name AS counterparty, o.invoice_reference
+            FROM expense_versions e
+            JOIN firsts f ON f.expense_id = e.expense_id
+            LEFT JOIN counterparties c ON c.id = e.counterparty_id
+            LEFT JOIN obligations o ON o.id = e.obligation_id
+            WHERE e.team_id = %s AND f.recorded_at >= %s AND f.recorded_at < %s
+            ORDER BY e.expense_id, e.version DESC
+            """,
+            (me.team_id, me.team_id, start, end + timedelta(days=1)),
+        )
+        rows = sorted((r for r in rows if not status or r["status"] == status), key=lambda r: (r["recorded_at"], r["expense_id"]))
+        audit(conn, me.team_id, "USER", me.user_id, "ExpensesExported", "team", me.team_id, {"start": start.isoformat(), "end": end.isoformat(), "status": status, "count": len(rows)})
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(EXPORT_COLUMNS)
+    for r in rows:
+        writer.writerow([
+            r["expense_id"], r["recorded_at"].date().isoformat(), _cell(r["counterparty"]), _cell(r["category"]),
+            "yes" if r["category_is_suggestion"] else "no", _cell(r["business_purpose"]), _cell(r["accounting_period"]), r["asset"],
+            _plain(r["gross_minor"], r["asset"]), _plain(r["net_minor"], r["asset"]), _plain(r["tax_minor"], r["asset"]),
+            _plain(r["gbp_value_minor"], "GBP"), r["status"], _cell(r["invoice_reference"]), r["version"],
+        ])
+    filename = f"expenses_{start.isoformat()}_to_{end.isoformat()}.csv"
+    # A BOM so Excel reads £ and accented names as UTF-8.
+    return Response("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/expenses/{expense_id}")

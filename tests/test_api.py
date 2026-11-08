@@ -208,3 +208,27 @@ def test_accounts_can_be_added_and_removed_by_an_approver(biz):
     assert client.post(f"/api/accounts/{account_id}/disconnect", headers=headers(biz, "APPROVER")).status_code == 200
     assert account_id not in {b["id"] for b in client.get("/api/balances", headers=headers(biz, "VIEWER")).json()["balances"]}
     assert client.post(f"/api/accounts/{account_id}/disconnect", headers=headers(biz, "APPROVER")).status_code == 404
+
+
+def test_expenses_export_is_a_csv_for_the_chosen_period(biz):
+    import csv
+    from datetime import date, timedelta
+
+    team_id = biz["team"]["id"]
+    today = date.today()
+    with tx() as conn:
+        count = fetch_one(conn, "SELECT COUNT(DISTINCT expense_id) AS n FROM expense_versions WHERE team_id = %s", (team_id,))["n"]
+    response = client.get("/api/expenses/export", params={"start": (today - timedelta(days=1)).isoformat(), "end": today.isoformat()}, headers=headers(biz, "VIEWER"))
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert f'filename="expenses_{today - timedelta(days=1)}_to_{today}.csv"' in response.headers["content-disposition"]
+    rows = list(csv.reader(response.text.lstrip("﻿").splitlines()))
+    assert rows[0][:3] == ["Expense ID", "Date", "Counterparty"]
+    assert len(rows) - 1 == count
+    assert all("£" not in cell for row in rows[1:] for cell in row[8:12])
+
+    past = client.get("/api/expenses/export", params={"start": "2000-01-01", "end": "2000-01-31"}, headers=headers(biz, "VIEWER"))
+    assert len(list(csv.reader(past.text.lstrip("﻿").splitlines()))) == 1
+    assert client.get("/api/expenses/export", params={"start": today.isoformat(), "end": "2000-01-01"}, headers=headers(biz, "VIEWER")).status_code == 422
+    with tx() as conn:
+        assert fetch_one(conn, "SELECT 1 AS ok FROM audit_events WHERE team_id = %s AND event_type = 'ExpensesExported'", (team_id,))
