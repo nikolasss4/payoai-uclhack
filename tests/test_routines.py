@@ -286,6 +286,24 @@ def test_channel_must_predate_the_details(biz):
     assert contacts.verify_destination(team["id"], approver, added["destination_id"], "CALL_BACK", "Called Sam", old_channel)["status"] == "VERIFIED"
 
 
+def test_approver_adds_a_channel_that_counts_only_for_later_details(biz):
+    team, approver = biz["team"], biz["team"]["users"]["APPROVER"]
+    pending = start(biz, "add_counterparty", {"display_name": "Examplo", "iban": FRAUD_IBAN})
+    with pytest.raises(contacts.VerificationRefused, match="Only an Approver"):
+        contacts.add_channel(team["id"], team["users"]["OPERATOR"], biz["examplo"], "phone", "020 7946 0001")
+    with pytest.raises(contacts.VerificationRefused, match="phone, email or contract"):
+        contacts.add_channel(team["id"], approver, biz["examplo"], "fax", "020 7946 0001")
+    with pytest.raises(contacts.VerificationRefused, match="Enter"):
+        contacts.add_channel(team["id"], approver, biz["examplo"], "phone", "  ")
+    channel = contacts.add_channel(team["id"], approver, biz["examplo"], "Phone", " 020 7946 0001 ")
+    assert (channel["kind"], channel["value"]) == ("phone", "020 7946 0001")
+    with tx() as conn:
+        assert fetch_one(conn, "SELECT count(*) AS n FROM audit_events WHERE team_id = %s AND event_type = 'ContactChannelAdded'", (team["id"],))["n"] == 1
+    # Details already waiting can't be verified with it.
+    with pytest.raises(contacts.VerificationRefused, match="after these details"):
+        contacts.verify_destination(team["id"], approver, pending["destination_id"], "CALL_BACK", "Called", channel["id"])
+
+
 def test_revoke_cancels_pending_approvals(biz, fake_model):
     result = bill(biz, fake_model, invoice_fields("V-1"))
     team = biz["team"]

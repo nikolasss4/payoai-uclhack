@@ -52,6 +52,30 @@ def add_counterparty(state: RunState, ctx) -> dict:
     return {"result": {"counterparty_id": counterparty_id, "destination_id": destination_id, "destination_status": "UNVERIFIED" if destination_id else None, "note": "New details can't be paid until an Approver verifies them on the verification screen."}}
 
 
+CHANNEL_KINDS = ("phone", "email", "contract")
+
+
+def add_channel(team_id: str, user_id: str, counterparty_id: str, kind: str, value: str) -> dict:
+    """Records how to reach a contact. A channel only counts for details that come in after it, so adding one can't verify details already waiting."""
+    kind, value = (kind or "").strip().lower(), (value or "").strip()
+    if kind not in CHANNEL_KINDS:
+        raise VerificationRefused("Choose phone, email or contract.")
+    if not value:
+        raise VerificationRefused("Enter the phone number, email or contract reference.")
+    with tx() as conn:
+        role = fetch_one(conn, "SELECT role FROM memberships WHERE team_id = %s AND user_id = %s", (team_id, user_id))
+        if not role or role["role"] != "APPROVER":
+            raise VerificationRefused("Only an Approver can add a contact channel.")
+        if not fetch_one(conn, "SELECT id FROM counterparties WHERE id = %s AND team_id = %s", (counterparty_id, team_id)):
+            raise VerificationRefused("That contact isn't in this team.")
+        channel = fetch_one(
+            conn, "INSERT INTO contact_channels (id, team_id, counterparty_id, kind, value) VALUES (%s, %s, %s, %s, %s) RETURNING id, kind, value, added_at",
+            (new_id("chn"), team_id, counterparty_id, kind, value),
+        )
+        audit(conn, team_id, "USER", user_id, "ContactChannelAdded", "counterparty", counterparty_id, {"channel_id": channel["id"], "kind": kind})
+    return channel
+
+
 def verify_destination(team_id: str, user_id: str, destination_id: str, method: str, evidence: str, channel_id: str | None = None) -> dict:
     """The contact channel must have been on file before the details came in."""
     if method == "PROVIDER_CHECK":
