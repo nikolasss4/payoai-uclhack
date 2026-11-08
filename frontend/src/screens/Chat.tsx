@@ -244,7 +244,7 @@ function EmptyChat({ mobile, onPrompt }: { mobile: boolean; onPrompt: (t: string
         <ReadyChip mobile />
         {headline}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {PROMPTS.map((t) => (
+          {PROMPTS.slice(0, 3).map((t) => (
             <button key={t} type="button" onClick={() => onPrompt(t)}
               style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, minHeight: 52, padding: "8px 14px", borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)", cursor: "pointer", fontSize: 14.5, textAlign: "left", color: "var(--text)" }}>
               {t}<Icon name="arrow_forward" size={18} style={{ color: "var(--muted)" }} />
