@@ -14,6 +14,7 @@ const ST: Record<string, [Tone, string]> = {
   Unknown: ["unknown", "question_mark"], "Outcome unknown": ["unknown", "question_mark"], "Record not found": ["unknown", "link_off"], "No balance": ["unknown", "question_mark"],
   Failed: ["danger", "error"], Rejected: ["danger", "cancel"], Blocked: ["danger", "block"], Block: ["danger", "block"], Revoked: ["danger", "remove_moderator"],
   Cancelled: ["neutral", "do_not_disturb_on"], Superseded: ["neutral", "swap_horiz"], Expired: ["neutral", "timer_off"], "Not applicable": ["neutral", "remove"],
+  Completed: ["ok", "task_alt"], Running: ["info", "sync"], "Waiting for an answer": ["warn", "help"], "Awaiting approval": ["warn", "front_hand"], "Awaiting document": ["warn", "receipt_long"],
   Draft: ["neutral", "edit_note"], Registered: ["neutral", "inbox"], Paused: ["neutral", "pause_circle"], "Manually resolved": ["neutral", "person_check"], Simulated: ["neutral", "science"],
 };
 
@@ -26,7 +27,8 @@ const CODES: Record<string, string> = {
   ELIGIBLE_FOR_APPROVAL: "Eligible for approval", BLOCK: "Blocked", PASS: "Pass", NOT_APPLICABLE: "Not applicable",
   UNVERIFIED: "Unverified", REVOKED: "Revoked", DRAFT: "Draft", SUPPORTED: "Supported", REVIEWED: "Reviewed", ACCOUNTED: "Accounted",
   MISSING_EVIDENCE: "Missing evidence", ACTIVE: "Active", PAUSED: "Paused", EXPIRED: "Expired", SIMULATED: "Simulated",
-  MANUALLY_RESOLVED: "Manually resolved", SANDBOX_OBSERVED: "Sandbox", TESTNET_OBSERVED: "Testnet",
+  MANUALLY_RESOLVED: "Manually resolved", COMPLETED: "Completed", RUNNING: "Running", WAITING_ANSWER: "Waiting for an answer",
+  AWAITING_APPROVAL: "Awaiting approval", AWAITING_DOCUMENT: "Awaiting document", SANDBOX_OBSERVED: "Sandbox", TESTNET_OBSERVED: "Testnet",
 };
 
 export function words(code?: string | null): string {

@@ -232,3 +232,30 @@ def test_expenses_export_is_a_csv_for_the_chosen_period(biz):
     assert client.get("/api/expenses/export", params={"start": today.isoformat(), "end": "2000-01-01"}, headers=headers(biz, "VIEWER")).status_code == 422
     with tx() as conn:
         assert fetch_one(conn, "SELECT 1 AS ok FROM audit_events WHERE team_id = %s AND event_type = 'ExpensesExported'", (team_id,))
+
+
+def test_audit_shows_runs_with_every_step_and_stays_in_the_team(biz, prepared):
+    h = headers(biz, "APPROVER")
+    feed = client.get("/api/audit?traces=1", headers=h).json()
+    runs = [e for e in feed["entries"] if e["kind"] == "run"]
+    run = next(e for e in runs if e["trace_id"] == prepared["run_id"])
+    assert run["actor_type"] == "AGENT" and run["steps"] >= 1
+    assert any(e["kind"] == "event" for e in feed["entries"])
+    assert all(e["kind"] != "run" for e in client.get("/api/audit?traces=1&actor=PROVIDER", headers=h).json()["entries"])
+    assert "kind" not in client.get("/api/audit", headers=h).json()["entries"][0]
+
+    detail = client.get(f"/api/audit/run/{prepared['run_id']}", headers=h).json()
+    assert detail["turn"] is None and detail["runs"][0]["id"] == prepared["run_id"]
+    assert len(detail["steps"]) == run["steps"]
+    assert all(s["run_id"] == prepared["run_id"] for s in detail["steps"])
+
+    assert client.get("/api/audit/step/x", headers=h).status_code == 400
+    assert client.get("/api/audit/turn/turn_missing", headers=h).status_code == 404
+    other_team, other_user = new_id("team"), new_id("user")
+    with tx() as conn:
+        conn.execute("INSERT INTO teams (id, name) VALUES (%s, 'Other Ltd')", (other_team,))
+        conn.execute("INSERT INTO users (id, name, email) VALUES (%s, 'Other', %s)", (other_user, f"{other_user}@example.test"))
+        conn.execute("INSERT INTO memberships (team_id, user_id, role) VALUES (%s, %s, 'APPROVER')", (other_team, other_user))
+    other = {"Authorization": f"Bearer {_sign(other_user)}", "X-Team-Id": other_team}
+    assert client.get(f"/api/audit/run/{prepared['run_id']}", headers=other).status_code == 404
+    assert client.get("/api/audit?traces=1", headers=other).json()["total"] == 0

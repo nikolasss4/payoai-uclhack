@@ -9,6 +9,7 @@ from collections import defaultdict
 
 from payoai.db import fetch_all, fetch_one
 from payoai.domain.money import format_minor
+from payoai.trace import redact
 
 
 def money(minor, asset) -> str | None:
@@ -181,6 +182,218 @@ def audit_feed(conn, team_id: str, actor: str | None, limit: int) -> dict:
             }
             for r in rows
         ],
+    }
+
+
+# Turns and Runs in the audit. A turn holds its own steps and the steps of every run it started.
+# A run nobody started from chat (a timer, a webhook, a tap on a card) is its own entry.
+
+RUN_ACTOR = {"TAP": "USER", "TIMER": "SYSTEM", "WEBHOOK": "SYSTEM", "SYSTEM": "SYSTEM", "CHAT": "AGENT", "CONFIRMATION": "AGENT", "EVAL": "SYSTEM"}
+
+
+def _duration_ms(start, end) -> int | None:
+    return None if start is None or end is None else int((end - start).total_seconds() * 1000)
+
+
+def _turn_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[list[dict], int]:
+    """Turns are asked by a person and answered by the agent, so they show under both."""
+    if actor not in (None, "USER", "AGENT"):
+        return [], 0
+    rows = fetch_all(
+        conn,
+        """
+        SELECT t.id, t.seq, t.chat_id, t.user_input, t.final_reply, t.model, t.status, t.cost_micros, t.started_at, t.ended_at,
+               c.title AS chat_title, u.name AS user_name, s.n AS steps, s.failed, s.tokens, s.cost, s.runs
+        FROM turns t JOIN chats c ON c.id = t.chat_id LEFT JOIN users u ON u.id = c.user_id
+        LEFT JOIN LATERAL (
+            SELECT count(*) AS n, count(*) FILTER (WHERE st.status = 'FAILED') AS failed,
+                   COALESCE(sum(COALESCE(st.input_tokens, 0) + COALESCE(st.output_tokens, 0)), 0) AS tokens,
+                   COALESCE(sum(st.cost_micros), 0) AS cost, count(DISTINCT st.run_id) AS runs
+            FROM trace_steps st
+            WHERE st.turn_id = t.id OR st.run_id IN (SELECT r.id FROM routine_runs r WHERE r.started_turn_id = t.id)
+        ) s ON true
+        WHERE t.team_id = %s ORDER BY t.started_at DESC LIMIT %s
+        """,
+        (team_id, limit),
+    )
+    total = fetch_one(conn, "SELECT count(*) AS n FROM turns WHERE team_id = %s", (team_id,))["n"]
+    return [
+        {
+            "id": f"turn:{r['id']}",
+            "kind": "turn",
+            "trace_id": r["id"],
+            "at": iso(r["started_at"]),
+            "actor_type": "AGENT",
+            "who": r["user_name"] or "Unknown person",
+            "what": r["user_input"],
+            "reply": r["final_reply"],
+            "chat": r["chat_title"],
+            "status": r["status"],
+            "model": r["model"],
+            "duration_ms": _duration_ms(r["started_at"], r["ended_at"]),
+            "steps": r["steps"] or 0,
+            "failed": r["failed"] or 0,
+            "runs": r["runs"] or 0,
+            "tokens": int(r["tokens"] or 0),
+            "cost_micros": int(r["cost"] or r["cost_micros"] or 0),
+            "record": None,
+        }
+        for r in rows
+    ], total
+
+
+def _run_entries(conn, team_id: str, actor: str | None, limit: int) -> tuple[list[dict], int]:
+    triggers = None if actor is None else [k for k, v in RUN_ACTOR.items() if v == actor]
+    if triggers == []:
+        return [], 0
+    where = "r.team_id = %s AND r.started_turn_id IS NULL AND (%s::text[] IS NULL OR r.trigger_type = ANY(%s::text[]))"
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT r.id, r.routine, r.trigger_type, r.triggered_by, r.status, r.error, r.created_at, r.updated_at, u.name AS user_name,
+               s.n AS steps, s.failed, s.tokens, s.cost, s.last_end
+        FROM routine_runs r LEFT JOIN users u ON u.id = r.triggered_by
+        LEFT JOIN LATERAL (
+            SELECT count(*) AS n, count(*) FILTER (WHERE st.status = 'FAILED') AS failed,
+                   COALESCE(sum(COALESCE(st.input_tokens, 0) + COALESCE(st.output_tokens, 0)), 0) AS tokens,
+                   COALESCE(sum(st.cost_micros), 0) AS cost, max(st.ended_at) AS last_end
+            FROM trace_steps st WHERE st.run_id = r.id
+        ) s ON true
+        WHERE {where} ORDER BY r.created_at DESC LIMIT %s
+        """,
+        (team_id, triggers, triggers, limit),
+    )
+    total = fetch_one(conn, f"SELECT count(*) AS n FROM routine_runs r WHERE {where}", (team_id, triggers, triggers))["n"]
+    entries = []
+    for r in rows:
+        actor_type = RUN_ACTOR.get(r["trigger_type"], "SYSTEM")
+        entries.append({
+            "id": f"run:{r['id']}",
+            "kind": "run",
+            "trace_id": r["id"],
+            "at": iso(r["created_at"]),
+            "actor_type": actor_type,
+            "who": r["user_name"] if actor_type == "USER" and r["user_name"] else actor_name(actor_type, None, None),
+            "what": f"{words(r['routine'])} routine · {words(r['trigger_type'])}",
+            "status": r["status"],
+            "error": r["error"],
+            "duration_ms": _duration_ms(r["created_at"], r["last_end"]),
+            "steps": r["steps"] or 0,
+            "failed": r["failed"] or 0,
+            "runs": 1,
+            "tokens": int(r["tokens"] or 0),
+            "cost_micros": int(r["cost"] or 0),
+            "record": None,
+        })
+    return entries, total
+
+
+def activity_feed(conn, team_id: str, actor: str | None, limit: int) -> dict:
+    """Audit events, turns and runs on one timeline, newest first."""
+    events = audit_feed(conn, team_id, actor, limit)
+    for e in events["entries"]:
+        e["kind"] = "event"
+    turns, turn_total = _turn_entries(conn, team_id, actor, limit)
+    runs, run_total = _run_entries(conn, team_id, actor, limit)
+    merged = sorted(events["entries"] + turns + runs, key=lambda e: e["at"] or "", reverse=True)[:limit]
+    return {"total": events["total"] + turn_total + run_total, "entries": merged}
+
+
+STEP_FIELDS = "id, turn_id, run_id, parent_id, step_type, name, status, input, output, trust_label, evidence_ids, error, model, thinking_level, input_tokens, output_tokens, cost_micros, started_at, ended_at"
+
+
+def _step_view(s: dict, events: list[dict]) -> dict:
+    return {
+        "id": s["id"],
+        "run_id": s["run_id"],
+        "parent_id": s["parent_id"],
+        "type": s["step_type"],
+        "name": s["name"],
+        "status": s["status"],
+        "trust": s["trust_label"],
+        "input": s["input"],
+        "output": s["output"],
+        "error": s["error"],
+        "evidence_ids": s["evidence_ids"] or [],
+        "model": s["model"],
+        "thinking": s["thinking_level"],
+        "input_tokens": s["input_tokens"],
+        "output_tokens": s["output_tokens"],
+        "cost_micros": s["cost_micros"],
+        "at": iso(s["started_at"]),
+        "duration_ms": _duration_ms(s["started_at"], s["ended_at"]),
+        "events": events,
+    }
+
+
+def trace_detail(conn, team_id: str, kind: str, trace_id: str) -> dict | None:
+    """Every step of one turn (with the runs it started) or of one run, with the audit events each step wrote."""
+    turn = None
+    if kind == "turn":
+        turn = fetch_one(conn, "SELECT id, user_input, final_reply, model, prompt_version, status, started_at, ended_at FROM turns WHERE id = %s AND team_id = %s", (trace_id, team_id))
+        if turn is None:
+            return None
+        runs = fetch_all(conn, "SELECT id, routine, routine_version, trigger_type, status, inputs, result, error, created_at, updated_at FROM routine_runs WHERE team_id = %s AND started_turn_id = %s ORDER BY created_at", (team_id, trace_id))
+    else:
+        runs = fetch_all(conn, "SELECT id, routine, routine_version, trigger_type, status, inputs, result, error, created_at, updated_at FROM routine_runs WHERE team_id = %s AND id = %s", (team_id, trace_id))
+        if not runs:
+            return None
+    run_ids = [r["id"] for r in runs]
+    steps = fetch_all(
+        conn,
+        f"SELECT {STEP_FIELDS} FROM trace_steps WHERE team_id = %s AND (turn_id = %s OR run_id = ANY(%s::text[])) ORDER BY started_at",
+        (team_id, turn["id"] if turn else None, run_ids),
+    )
+    event_rows = fetch_all(
+        conn,
+        """
+        SELECT e.id, e.trace_step_id, e.actor_type, e.actor_id, e.event_type, e.entity_type, e.entity_id, e.data, e.created_at, u.name AS user_name
+        FROM audit_events e LEFT JOIN users u ON u.id = e.actor_id
+        WHERE e.team_id = %s AND e.trace_step_id = ANY(%s::text[]) ORDER BY e.id
+        """,
+        (team_id, [s["id"] for s in steps]),
+    )
+    records = resolve_records(conn, team_id, [(e["entity_type"], e["entity_id"]) for e in event_rows])
+    by_step: dict[str, list] = defaultdict(list)
+    for e in event_rows:
+        by_step[e["trace_step_id"]].append({
+            "id": e["id"],
+            "at": iso(e["created_at"]),
+            "actor_type": e["actor_type"],
+            "who": actor_name(e["actor_type"], e["actor_id"], e["user_name"]),
+            "what": event_text(e["event_type"], e["data"]),
+            "event_type": e["event_type"],
+            "data": e["data"],
+            "record": records.get((e["entity_type"], e["entity_id"])),
+        })
+    return {
+        "kind": kind,
+        "turn": turn and {
+            "id": turn["id"],
+            "input": turn["user_input"],
+            "reply": turn["final_reply"],
+            "model": turn["model"],
+            "prompt_version": turn["prompt_version"],
+            "status": turn["status"],
+            "at": iso(turn["started_at"]),
+            "duration_ms": _duration_ms(turn["started_at"], turn["ended_at"]),
+        },
+        "runs": [
+            {
+                "id": r["id"],
+                "routine": r["routine"],
+                "label": words(r["routine"]),
+                "version": r["routine_version"],
+                "trigger": r["trigger_type"],
+                "status": r["status"],
+                "inputs": redact(r["inputs"]),
+                "result": redact(r["result"]),
+                "error": r["error"],
+                "at": iso(r["created_at"]),
+            }
+            for r in runs
+        ],
+        "steps": [_step_view(s, by_step.get(s["id"], [])) for s in steps],
     }
 
 
