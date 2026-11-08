@@ -117,7 +117,7 @@ interface Contact {
 }
 
 export function ContactRecord({ id }: { id: string }) {
-  const { open, canWrite, requestChat } = useApp();
+  const { open, canWrite, requestChat, isA } = useApp();
   const { data: c, error } = useLive<Contact>(`/api/counterparties/${id}`, 20000);
   if (!c) return <Loading error={error} />;
   const verified = c.destinations.filter((d) => d.status === "VERIFIED").length;
@@ -155,6 +155,7 @@ export function ContactRecord({ id }: { id: string }) {
       <Section title="Contact channels on file">
         {!c.channels.length && <span style={{ fontSize: 14, color: "var(--muted)" }}>None on file, so a call-back can't be done yet.</span>}
         {c.channels.map((ch) => <Row key={ch.id} k={words(ch.kind)} v={<>{ch.value} <span style={{ color: "var(--muted)" }}>· added {day(ch.added_at)}</span></>} />)}
+        {isA && <div style={{ marginTop: 8 }}><AddChannel counterpartyId={c.id} note="Use a number, email or contract you got independently, not one from an invoice or chat. A channel only counts for details that come in after it's added." /></div>}
       </Section>
       <Section title="Recent bills">
         {!c.bills.length && <span style={{ fontSize: 14, color: "var(--muted)" }}>No bills yet.</span>}
@@ -165,6 +166,51 @@ export function ContactRecord({ id }: { id: string }) {
         {c.payments.map((p) => <RowLink key={p.id} onClick={() => open({ kind: "payment", id: p.id }, true)} left={<span className="num">{p.amount} <span style={{ color: "var(--muted)" }}>· {day(p.created_at)}</span></span>} right={<Badge b={paymentBadge(p)} size="sm" />} />)}
       </Section>
     </RecordLayout>
+  );
+}
+
+/* Contact channels */
+
+const CHANNEL_KINDS: [string, string, string][] = [["phone", "Phone", "e.g. +44 20 7946 0000"], ["email", "Email", "e.g. accounts@supplier.com"], ["contract", "Contract", "e.g. MSA-2026-014, signed 3 Mar"]];
+
+function AddChannel({ counterpartyId, note }: { counterpartyId: string; note?: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState("phone");
+  const [value, setValue] = useState("");
+  const act = useAction();
+  const placeholder = CHANNEL_KINDS.find(([k]) => k === kind)?.[2];
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start", minHeight: 36, padding: 0, background: "transparent", border: 0, cursor: "pointer", fontSize: 13.5, fontWeight: 500 }}>
+        <Icon name="add" size={18} />Add a contact channel
+      </button>
+    );
+  }
+  const save = () => {
+    if (!value.trim()) return act.setError("Enter the phone number, email or contract reference.");
+    return act.run(async () => {
+      await api(`/api/counterparties/${counterpartyId}/channels`, { method: "POST", body: { kind, value: value.trim() } });
+      setValue("");
+      setOpen(false);
+      refreshAll();
+    });
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, borderRadius: 12, border: "1px solid var(--border)" }}>
+      <div role="radiogroup" aria-label="Channel type" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {CHANNEL_KINDS.map(([k, l]) => (
+          <button key={k} type="button" role="radio" aria-checked={kind === k} onClick={() => { setKind(k); act.setError(null); }}
+            style={{ minHeight: 36, padding: "0 14px", borderRadius: 999, fontSize: 13.5, cursor: "pointer", border: `1.5px solid ${kind === k ? "var(--text)" : "var(--border)"}`, background: kind === k ? "var(--raised)" : "transparent" }}>{l}</button>
+        ))}
+      </div>
+      <input className="input" aria-label="Channel" value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
+      {note && <span style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 }}>{note}</span>}
+      <ErrorLine error={act.error} />
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="btn-pill btn-primary" aria-busy={act.busy || undefined} onClick={save} style={{ minHeight: 40, fontSize: 14 }}>Save channel</button>
+        <button type="button" className="btn-pill" onClick={() => { setOpen(false); act.setError(null); }} style={{ minHeight: 40, fontSize: 14 }}>Cancel</button>
+      </div>
+    </div>
   );
 }
 
@@ -232,6 +278,7 @@ function VerifyForm({ d }: { d: Destination }) {
   const [done, setDone] = useState<{ same_person: boolean; note?: string } | null>(null);
   const act = useAction();
   const needsChannel = METHODS.find(([m]) => m === method)?.[2] ?? true;
+  const independent = d.channels.some((ch) => ch.independent);
   const pick = (box: { bd: boolean }) => ({ border: `1.5px solid ${box.bd ? "var(--text)" : "var(--border)"}`, background: box.bd ? "var(--raised)" : "transparent" });
   const submit = () => {
     if (!method) return act.setError("Choose a method.");
@@ -271,8 +318,8 @@ function VerifyForm({ d }: { d: Destination }) {
           <span style={{ fontSize: 13, fontWeight: 500 }}>Contact channel on file</span>
           {!d.channels.length && <span style={{ fontSize: 13.5, color: "var(--muted)" }}>No channels on file for this contact.</span>}
           {d.channels.map((ch) => (
-            <button key={ch.id} type="button" role="radio" aria-checked={channel === ch.id} onClick={() => { setChannel(ch.id); act.setError(null); }}
-              style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 52, padding: "6px 12px", borderRadius: 10, cursor: "pointer", textAlign: "left", ...pick({ bd: channel === ch.id }) }}>
+            <button key={ch.id} type="button" role="radio" aria-checked={channel === ch.id} disabled={!ch.independent} onClick={() => { setChannel(ch.id); act.setError(null); }}
+              style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 52, padding: "6px 12px", borderRadius: 10, cursor: ch.independent ? "pointer" : "not-allowed", opacity: ch.independent ? 1 : 0.7, textAlign: "left", ...pick({ bd: channel === ch.id }) }}>
               <Icon name={channel === ch.id ? "radio_button_checked" : "radio_button_unchecked"} size={18} />
               <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
                 <span className="wrap" style={{ fontSize: 14 }}>{ch.label}</span>
@@ -280,6 +327,12 @@ function VerifyForm({ d }: { d: Destination }) {
               </div>
             </button>
           ))}
+          {!independent && (
+            <span style={{ fontSize: 12.5, color: "var(--warn)", lineHeight: 1.45 }}>
+              No channel was on file before these details came in. You can still use a number you add now for the call, but it can't count as independent, so choose New relationship and say in the evidence how you got the number.
+            </span>
+          )}
+          <AddChannel counterpartyId={d.counterparty_id} note="Use a number, email or contract you got independently, not one from an invoice or chat. It's saved to the contact and counts for details that come in later." />
         </div>
       )}
       <label className="field">Evidence (required)<textarea className="input" value={evidence} onChange={(e) => setEvidence(e.target.value)} placeholder="Who you spoke to, when, and what they confirmed" /></label>

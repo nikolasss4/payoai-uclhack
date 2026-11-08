@@ -723,6 +723,20 @@ def channels(counterparty_id: str, me: Member = Depends(member)):
         return fetch_all(conn, "SELECT id, kind, value, added_at FROM contact_channels WHERE team_id = %s AND counterparty_id = %s ORDER BY added_at", (me.team_id, counterparty_id))
 
 
+class NewChannel(BaseModel):
+    kind: str
+    value: str
+
+
+@app.post("/api/counterparties/{counterparty_id}/channels")
+def add_channel(counterparty_id: str, body: NewChannel, me: Member = Depends(member)):
+    try:
+        channel = contacts.add_channel(me.team_id, me.user_id, counterparty_id, body.kind, body.value)
+    except contacts.VerificationRefused as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {**channel, "added_at": channel["added_at"].isoformat()}
+
+
 class Verify(BaseModel):
     method: str
     evidence: str
