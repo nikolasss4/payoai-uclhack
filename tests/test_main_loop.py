@@ -145,6 +145,30 @@ def test_outage_gives_an_honest_message_and_saves_the_turn(biz):
     assert result["status"] == "FAILED" and "unavailable" in result["reply"]
 
 
+def _error_event(turn_id):
+    with tx() as conn:
+        return fetch_one(conn, "SELECT payload FROM chat_events WHERE turn_id = %s AND kind = 'ERROR'", (turn_id,))["payload"]
+
+
+def test_missing_key_says_so_and_asks_for_one(biz, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    args = new_turn(biz, "hi")
+    result = main_loop.run_turn(*args)
+    assert result["status"] == "FAILED" and "No Gemini API key is configured" in result["reply"]
+    assert _error_event(args[3])["code"] == "NO_KEY"
+
+
+def test_rejected_key_says_so(biz):
+    def rejected(model_input, session):
+        raise llm.LLMFailure("ClientError: 400 INVALID_ARGUMENT. API key not valid. Please pass a valid API key. API_KEY_INVALID")
+
+    main_loop.set_fake_model(rejected)
+    args = new_turn(biz, "hi")
+    result = main_loop.run_turn(*args)
+    assert "rejected the configured API key" in result["reply"]
+    assert _error_event(args[3])["code"] == "BAD_KEY"
+
+
 def test_multipart_requests_save_a_task_list(biz):
     chat_id = new_id("chat")
     script = Script(("update_task_list", {"items": [{"description": "Pay Alex", "status": "PENDING"}, {"description": "Check balance", "status": "PENDING"}]}), "Plan saved.")

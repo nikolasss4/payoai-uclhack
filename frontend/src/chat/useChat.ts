@@ -19,7 +19,7 @@ export type Item =
   | { t: "start"; key: string; ev: ChatEvent }
   | { t: "question"; key: string; ev: ChatEvent; answered: boolean; answer: string | null }
   | { t: "approval"; key: string; approvalId: string }
-  | { t: "error"; key: string; message: string }
+  | { t: "error"; key: string; message: string; code?: "NO_KEY" | "BAD_KEY"; retry?: string; fixable?: boolean }
   | { t: "thinking"; key: string; turnId: string; lines: { text: string; source: string }[]; live: boolean; startedAt: string; endedAt: string }
   | { t: "draft"; key: string; text: string };
 
@@ -210,7 +210,9 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
     } else if (e.kind === "SUGGESTION" && p.text) {
       out.push({ t: "agent", key: `g-${e.id}`, parts: [{ type: "text", text: p.text }] });
     } else if (e.kind === "ERROR") {
-      out.push({ t: "error", key: `e-${e.id}`, message: p.message || "Something went wrong with this request." });
+      const code = p.code === "NO_KEY" || p.code === "BAD_KEY" ? p.code : undefined;
+      const retry = turns.find((t) => t.id === e.turn_id)?.text;
+      out.push({ t: "error", key: `e-${e.id}`, message: p.message || "Something went wrong with this request.", code, retry });
     }
   }
   // A question counts as answered once its run moves on, or once the person replies after it.
@@ -224,6 +226,9 @@ function buildTimeline(turns: Turn[], events: ChatEvent[], decided: Record<strin
       item.answer = item.answer ?? reply?.text ?? null;
     }
   });
+  // Only the newest key error offers to take a key, and only until the agent answers again.
+  const lastError = [...out].reverse().find((x) => x.t === "error" || x.t === "agent");
+  if (lastError && lastError.t === "error" && lastError.code) lastError.fixable = true;
   // A thinking block is live only while its Turn has no reply and nothing has come after it.
   const tailThinking = out[out.length - 1];
   if (tailThinking && tailThinking.t === "thinking" && !done.has(tailThinking.turnId) && typing) tailThinking.live = true;
