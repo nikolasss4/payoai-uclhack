@@ -1,23 +1,82 @@
 # PayoAI
 
-PayoAI is a finance agent for the UCL AgentVerse 2026 Finance track. It runs on synthetic data and a simulated payment provider. **It has never moved real money, and it uses no real records, real account details or real logins.**
+**An AI agent that runs accounts payable for UK small businesses.** It handles bills, invoices and contractor payments, and the owner just approves.
 
-## The user and the decision
+Built for the UCL AgentVerse 2026 Finance track.
 
-The user is a UK small business owner with no finance team. The decision is: "Is it safe to pay this bill now, and can we afford it?"
+**Live demo: [payoai.ecomnis.com](https://payoai.ecomnis.com)**
 
-The failures that hurt this person are paying a fraudster's changed bank details, paying the same bill twice, and missing a payment because cash ran short.
+> For safety, the demo has no Google Gemini API key, so the agent doesn't run there. You can click through the app and its seeded data, but chat requests and bill reading won't work. To try the agent, run it yourself with your own key. See [Run it yourself](#run-it-yourself).
 
-## What it does
+PayoAI runs on synthetic data and a simulated payment provider. **It has never moved real money, and it uses no real records, real account details or real logins.**
 
-The owner uploads a bill or asks a question in chat. A model reads the invoice and answers questions, and fixed code does everything that decides or moves money.
+## The problem
 
-- Code compares the invoice with the supplier's Verified Destination, past bills, UK invoice rules and the current cash position. The worst result wins: `BLOCK`, `NEEDS_REVIEW`, `NEEDS_INFORMATION` or `ELIGIBLE_FOR_APPROVAL`.
-- A blocked bill, or one missing essential information, gets no payment. Any other payment waits for a person with the Approver role, who approves one exact payment through its hash.
-- Bills are only ever paid to a destination a person has verified. Details on an invoice or in chat are never used as a payee.
-- Every step is saved as a Trace Step, and financial events go to an append-only audit table.
+Our users are small business owners with no finance team. They need three things:
 
-## Models
+- **Payments.** Every bill and contractor paid to the right person, for the right amount, once.
+- **Compliance.** A record for every payment that HMRC will accept, ready for the accountant.
+- **Cash flow.** Running short of cash is one of the most common reasons small firms fail.
+
+Where it goes wrong: paying a fraudster, paying twice, and running out of cash.
+
+## What the agent does
+
+You ask in chat: "Pay this bill." "Pay Alex £400." "Can we afford it?"
+
+| Payments | Compliance | Cash flow |
+|---|---|---|
+| Processes every bill and invoice | Checks invoices against UK VAT rules | Forecasts the next 7 days |
+| Pays only verified contractors | Lists what's missing for your accountant | Protects a cash reserve |
+| Bank transfers and crypto (USDC) | Records each payment and chases missing receipts | Warns you before a shortfall |
+| Blocks duplicates and changed bank details | Keeps a full audit trail | Pays the bills due soonest first |
+| Sends only after your approval | | |
+
+It also handles verified contacts, VAT reports, expenses and receipts, recurring payments and batch payments.
+
+**You approve every payment. The agent does the rest.**
+
+## Three protections
+
+**1. Compliance: two questions, kept apart.**
+- *Is it safe to pay?* Safety rules can block a payment: changed bank details or wallet, an exact duplicate bill, or the wrong chain or token.
+- *Is it right for the books?* UK VAT rules flag a bill for review: missing VAT invoice details, line and total arithmetic, and full vs simplified invoices (up to £250).
+
+The ruleset is `uk-invoice-1.1`, based on HMRC VAT Notice 700/21. Its output is prepared for accountant review and isn't certified compliant.
+
+**2. Fraud and scams.** A crypto payment can't be pulled back, so the full wallet address must match the verified one exactly. A lookalike address with the same first and last characters is blocked (address poisoning). The chain and token contract must match too, since a matching symbol isn't enough, and so must the rail (bank or wallet). Changed bank details get the same check. If an invoice has a changed IBAN, no payment is prepared, so there's nothing to approve. Hidden text telling the AI to skip the checks changes nothing, because the checks are code.
+
+**3. Cash.** A 7-day forecast per currency covers bills due, payments in flight and approvals. A bill that would break the cash reserve is flagged with the shortfall. Batches share out cash by due date, soonest first. A stale balance never reports "all fine".
+
+## How the agent is built
+
+- **Main Loop.** It chats and answers fast, with read-only tools: look up records, extract a field, show it.
+- **Routines.** Anything that needs control runs as a Routine, a fixed tree of code steps and LLM steps.
+
+The agent works out what you want. The Routine decides what's allowed. The model has no tool to approve or pay.
+
+What makes it an agent:
+
+- **Talks freely.** It answers any question about your payables from live records.
+- **Plans in sequence.** For a message with several bills, it writes a plan and runs one Routine at a time.
+- **Cards in the chat.** You start, pick an option, fill a missing field or approve, right in the conversation.
+- **Searches the web.** This runs in an isolated Routine with no business data and no write tools.
+- **Full traceability.** Every agent turn and Routine run is saved step by step: model calls, code steps, untrusted inputs, time and cost. You can see which step went wrong, LLM or code, and test one step alone or the whole run with the real model.
+- **Tested.** 40 held-out cases against LLM-only and rules-only builds.
+
+### How the verification loop works
+
+The model's output is checked by code at each point where it could matter, and a failed check stops or downgrades the step. It is never accepted on trust.
+
+1. **Extraction.** The model must quote the document for each key field. Code confirms that each quote is in the document and contains the value. A failure gives `NEEDS_REVIEW`.
+2. **Decision.** Code Nodes run the checks and combine them, and the worst result wins: `BLOCK`, `NEEDS_REVIEW`, `NEEDS_INFORMATION` or `ELIGIBLE_FOR_APPROVAL`. The model doesn't take part, and Memory isn't an input.
+3. **Findings.** Investigate may only add suggestions. A finding that cites no real record is dropped.
+4. **Replies.** Before a chat reply is final, code checks that its figures appear in this Turn's tool results, and that words like "paid" match the record's status. While the reply streams, it is shown greyed out as an unchecked draft, and the checked reply replaces it. A failed reply is regenerated once. A second failure shows the raw records instead.
+5. **Approval.** The Approver's tap carries the payment hash shown on screen. One database statement accepts it only if the approval is still pending, the hash matches, it hasn't expired, the person is still an Approver and payments aren't paused.
+6. **Execution.** Before sending, code recomputes the hash and re-checks authority, the destination and cash. The attempt is saved before anything is sent, and a timeout becomes `UNKNOWN` and is never resent.
+7. **Reconciliation.** The status comes from asking the provider directly. Code compares the amount, asset, recipient and reference with what was approved, and a mismatch goes to manual review.
+
+### Models
 
 These are the exact identifiers in `src/payoai/agent/config.py`, called through the Gemini Interactions API.
 
@@ -31,40 +90,64 @@ These are the exact identifiers in `src/payoai/agent/config.py`, called through 
 | Explain, category suggestion, draft request | `gemini-3.8-flash` | `low` |
 | Auto Mode learner | `gemini-3.5-flash-lite` | `minimal` |
 
-## How the verification loop works
+## Run it yourself
 
-The model's output is checked by code at each point where it could matter, and a failed check stops or downgrades the step. It is never accepted on trust.
+The agent is ready to run. You only need to set it up locally with your own Gemini API key.
 
-1. **Extraction.** The model must quote the document for each key field. Code confirms that each quote is in the document and contains the value. A failure gives `NEEDS_REVIEW`.
-2. **Decision.** Code Nodes run the checks and combine them. The model doesn't take part, and Memory isn't an input.
-3. **Findings.** Investigate may only add suggestions. A finding that cites no real record is dropped.
-4. **Replies.** Before a chat reply is final, code checks that its figures appear in this Turn's tool results, and that words like "paid" match the record's status. While the reply streams, it is shown greyed out as an unchecked draft, with no Chips, and the checked reply replaces it. A draft that fails the check is withdrawn. A failed reply is regenerated once. A second failure shows the raw records instead. The thinking line above it shows the Main Loop's own steps, and the model's thought summaries when it gives any. Those are labelled as thinking and aren't checked.
-5. **Approval.** The Approver's tap carries the payment hash shown on screen. One database statement accepts it only if the approval is still pending, the hash matches, it hasn't expired, the person is still an Approver and payments aren't paused.
-6. **Execution.** Before sending, code recomputes the hash and re-checks authority, the destination and cash. The attempt is saved before anything is sent, and a timeout becomes `UNKNOWN` and is never resent.
-7. **Reconciliation.** The status comes from asking the provider directly. Code compares the amount, asset, recipient and reference with what was approved, and a mismatch goes to manual review.
+### 1. Install the requirements
 
-Explain's wording isn't checked by code. In evaluation, an LLM judge scores a sample of it, and that judge can't override a code result.
-
-## Run it
-
-You need Python 3.12, `uv`, Node 20 or later, a Postgres database and a Gemini API key. Copy the names from `.env.example` into these git-ignored files, and never commit values.
-
-| File | Used by | Names |
-|---|---|---|
-| `.env.shared` | Every process | `DATABASE_URL`, `PROVIDER_MODE` |
-| `.env.agent` | `agent-worker` | `GEMINI_API_KEY` |
-| `.env.money` | `money-worker` | `AIRWALLEX_API_KEY`, `WISE_API_TOKEN`, `CIRCLE_API_KEY`, `TESTNET_SIGNER_KEY`, `CHAIN_RPC_URL`, `TEST_CARD_TOKEN` |
-| `.env.api` | `api` | `SESSION_SECRET`, `WEBHOOK_SECRET_SIMULATOR` |
-
-The provider names in `.env.money` are for rails that aren't built, so they can stay empty.
+- Python 3.12 and [`uv`](https://docs.astral.sh/uv/)
+- Node 20 or later
+- Postgres (local or hosted)
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
 
 ```bash
+git clone https://github.com/nikolasss4/payoai-uclhack.git
+cd payoai-uclhack
 uv sync
+createdb payoai          # or create a database any other way
+```
+
+### 2. Create the env files
+
+Each process loads only the secrets it needs, from its own file in the repo root. These files are git-ignored, so never commit them. `.env.example` lists every name.
+
+**`.env.shared`** (every process)
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/payoai
+PROVIDER_MODE=simulator
+```
+
+**`.env.agent`** (the agent worker)
+
+```bash
+GEMINI_API_KEY=your-gemini-api-key
+```
+
+**`.env.api`** (the API)
+
+```bash
+SESSION_SECRET=any-long-random-string
+WEBHOOK_SECRET_SIMULATOR=another-long-random-string
+```
+
+**`.env.money`** (the money worker) can be left out. Its names are for payment rails that aren't built yet (Airwallex, Wise, Circle), and every payment goes through the simulator.
+
+You can generate the secrets with `openssl rand -hex 32`.
+
+### 3. Seed and start
+
+```bash
 uv run python -m payoai.seed   # applies migrations and creates the synthetic demo company
 scripts/dev.sh                 # builds the frontend if needed, then starts the API, three workers and the test shop
 ```
 
-The app is then at http://127.0.0.1:8000. It's a React app in `frontend/`, built into `web/dist` and served by the API. For frontend work, run `npm run dev` in `frontend/` (port 5173, with `/api` proxied to port 8000). The Developer Console is still the plain page at `/dev.html`. To run the benchmark, see `deck/DATA.md` and `docs/evaluation.md`:
+Open http://127.0.0.1:8743 and sign in as one of the seeded users. The test shop runs on port 8793. To use other ports, set `API_PORT` and `MERCHANT_PORT`, for example `API_PORT=9100 scripts/dev.sh`. Logs are in `data/logs/`.
+
+For frontend work, run `npm run dev` in `frontend/` (port 5173, with `/api` proxied to `API_PORT`). The Developer Console is at `/dev.html`.
+
+To run the benchmark (see `deck/DATA.md` and `docs/evaluation.md`):
 
 ```bash
 PYTHONPATH="$PWD:$PWD/src" uv run python -m evals.runner --suite routines --split dev
