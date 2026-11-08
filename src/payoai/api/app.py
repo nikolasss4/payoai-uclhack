@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from payoai.agent import chips, read_tools
-from payoai.api import views
+from payoai.api import avatars, views
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.domain.money import DECIMALS, format_minor, to_minor
 from payoai.money import approval as approvals
@@ -91,22 +91,114 @@ class SignIn(BaseModel):
     email: str
 
 
+def _profile(conn, user_id: str) -> dict | None:
+    """The person, their teams and whether they're a developer, with each profile picture's URL."""
+    user = fetch_one(conn, "SELECT u.id, u.name, u.email, a.updated_at AS avatar_at FROM users u LEFT JOIN avatars a ON a.owner_kind = 'user' AND a.owner_id = u.id WHERE u.id = %s", (user_id,))
+    if user is None:
+        return None
+    teams = fetch_all(
+        conn,
+        """
+        SELECT t.id, t.name, m.role, (SELECT count(*) FROM memberships x WHERE x.team_id = t.id) AS members, a.updated_at AS avatar_at
+        FROM memberships m JOIN teams t ON t.id = m.team_id LEFT JOIN avatars a ON a.owner_kind = 'team' AND a.owner_id = t.id
+        WHERE m.user_id = %s AND NOT t.is_eval ORDER BY t.name
+        """,
+        (user_id,),
+    )
+    is_developer = fetch_one(conn, "SELECT 1 AS ok FROM platform_roles WHERE user_id = %s", (user_id,)) is not None
+    return {
+        "user": {"id": user["id"], "name": user["name"], "email": user["email"], "avatar_url": avatars.url("user", user["id"], user["avatar_at"])},
+        "teams": [{"id": t["id"], "name": t["name"], "role": t["role"], "members": t["members"], "avatar_url": avatars.url("team", t["id"], t["avatar_at"])} for t in teams],
+        "developer": is_developer,
+    }
+
+
 @app.post("/api/session")
 def sign_in(body: SignIn):
     """Demo sign-in with seeded users only. There are no real accounts."""
     with tx() as conn:
-        user = fetch_one(conn, "SELECT id, name, email FROM users WHERE email = %s", (body.email,))
+        user = fetch_one(conn, "SELECT id FROM users WHERE email = %s", (body.email,))
         if user is None:
             raise HTTPException(404, "No demo user with that email.")
-        teams = fetch_all(conn, "SELECT t.id, t.name, m.role, (SELECT count(*) FROM memberships x WHERE x.team_id = t.id) AS members FROM memberships m JOIN teams t ON t.id = m.team_id WHERE m.user_id = %s AND NOT t.is_eval ORDER BY t.name", (user["id"],))
-        is_developer = fetch_one(conn, "SELECT 1 AS ok FROM platform_roles WHERE user_id = %s", (user["id"],)) is not None
-    return {"token": _sign(user["id"]), "user": user, "teams": teams, "developer": is_developer}
+        profile = _profile(conn, user["id"])
+    return {"token": _sign(user["id"]), **profile}
+
+
+@app.get("/api/me")
+def me_profile(user_id: str = Depends(current_user)):
+    """The signed-in person's profile, re-read so names, teams and pictures stay current."""
+    with tx() as conn:
+        profile = _profile(conn, user_id)
+    if profile is None:
+        raise HTTPException(401, "Sign in first.")
+    return profile
 
 
 @app.get("/api/demo-users")
 def demo_users():
     with tx() as conn:
-        return fetch_all(conn, "SELECT u.name, u.email, m.role, t.name AS team_name FROM users u JOIN memberships m ON m.user_id = u.id JOIN teams t ON t.id = m.team_id WHERE t.id = 'team_demo' ORDER BY m.role, u.name")
+        rows = fetch_all(conn, "SELECT u.id, u.name, u.email, m.role, t.name AS team_name, a.updated_at AS avatar_at FROM users u JOIN memberships m ON m.user_id = u.id JOIN teams t ON t.id = m.team_id LEFT JOIN avatars a ON a.owner_kind = 'user' AND a.owner_id = u.id WHERE t.id = 'team_demo' ORDER BY m.role, u.name")
+    return [{"name": r["name"], "email": r["email"], "role": r["role"], "team_name": r["team_name"], "avatar_url": avatars.url("user", r["id"], r["avatar_at"])} for r in rows]
+
+
+# Profile pictures
+
+
+async def _read_picture(file: UploadFile) -> bytes:
+    data = await file.read(avatars.MAX_BYTES + 1)
+    try:
+        avatars.check(data)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return data
+
+
+@app.put("/api/me/avatar")
+async def set_my_avatar(file: UploadFile = File(...), user_id: str = Depends(current_user)):
+    """Anyone signed in can change their own picture. It shows in every team they belong to."""
+    data = await _read_picture(file)
+    with tx() as conn:
+        return {"avatar_url": avatars.save(conn, "user", user_id, data, user_id)}
+
+
+@app.delete("/api/me/avatar")
+def remove_my_avatar(user_id: str = Depends(current_user)):
+    with tx() as conn:
+        avatars.remove(conn, "user", user_id)
+    return {"avatar_url": None}
+
+
+@app.put("/api/team/avatar")
+async def set_team_avatar(file: UploadFile = File(...), me: Member = Depends(member)):
+    """The organisation's picture. Only an Approver can change it, and each change is in the Audit."""
+    me.require("APPROVER")
+    data = await _read_picture(file)
+    with tx() as conn:
+        avatar_url = avatars.save(conn, "team", me.team_id, data, me.user_id)
+        audit(conn, me.team_id, "USER", me.user_id, "OrganisationPictureChanged", "team", me.team_id)
+    return {"avatar_url": avatar_url}
+
+
+@app.delete("/api/team/avatar")
+def remove_team_avatar(me: Member = Depends(member)):
+    me.require("APPROVER")
+    with tx() as conn:
+        if avatars.remove(conn, "team", me.team_id):
+            audit(conn, me.team_id, "USER", me.user_id, "OrganisationPictureRemoved", "team", me.team_id)
+    return {"avatar_url": None}
+
+
+@app.get("/api/avatars/{kind}/{owner_id}")
+def get_avatar(kind: str, owner_id: str, v: str = "", s: str = ""):
+    """A picture from a signed URL. The version is in the URL, so the image never changes at that address."""
+    if not avatars.valid(kind, owner_id, v, s):
+        raise HTTPException(404)
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT media_type, data FROM avatars WHERE owner_kind = %s AND owner_id = %s", (kind, owner_id))
+    if row is None:
+        raise HTTPException(404)
+    headers = {"Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"}
+    return Response(content=bytes(row["data"]), media_type=row["media_type"], headers=headers)
 
 
 # Chat

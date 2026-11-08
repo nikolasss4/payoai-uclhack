@@ -50,6 +50,8 @@ export const decisionBadge = (decision?: string | null) => (decision ? badge(dec
 export function initials(name?: string | null): string {
   return (name || "?").replace(/\(.*?\)/g, "").split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 }
+/** Initials for a business, leaving out "Ltd" and "Limited". */
+export const orgInitials = (name?: string | null) => initials((name || "").replace(/\b(Ltd|Limited|PLC|LLP)\b\.?/gi, "").trim() || name);
 export const firstName = (name?: string | null) => (name || "").split(" ")[0];
 
 // Dates. Dates without a time ("2026-11-14") are read as local calendar days.
@@ -130,5 +132,17 @@ export const ROLE_HINT: Record<string, string> = {
   OPERATOR: "Chat, upload, start Routines, correct records",
   VIEWER: "Read-only",
 };
+
+/** Each role's ring around a profile picture and its chip on the sign-in screen. Fixed colours, as in the design. */
+export const ROLE_STYLE: Record<string, { ring: string; chipBg: string; chipFg: string; icon: string }> = {
+  APPROVER: { ring: "#D4F53C", chipBg: "#D4F53C", chipFg: "#0B0B0C", icon: "verified" },
+  OPERATOR: { ring: "#7FA8FF", chipBg: "#E3ECFF", chipFg: "#1F3F8A", icon: "tune" },
+  VIEWER: { ring: "#FFB27A", chipBg: "#FFEBDC", chipFg: "#8A3E00", icon: "visibility" },
+};
+
+export function greeting(now = new Date()): string {
+  const h = now.getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;

@@ -7,7 +7,7 @@ import { Badge, ErrorLine, Icon, Skeleton } from "../ui";
 
 export interface TraceEntry {
   id: string; kind: "turn" | "run"; trace_id: string; at: string; actor_type: "USER" | "AGENT" | "SYSTEM" | "PROVIDER";
-  who: string; what: string; reply?: string | null; chat?: string | null; status: string; model?: string | null; error?: string | null;
+  who: string; photo?: string | null; what: string; reply?: string | null; chat?: string | null; status: string; model?: string | null; error?: string | null;
   duration_ms: number | null; steps: number; failed: number; runs: number; tokens: number; cost_micros: number;
 }
 

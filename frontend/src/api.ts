@@ -1,8 +1,8 @@
 /* The API client. The server checks every permission. Role checks here only decide which buttons to show. */
 
 export type Role = "APPROVER" | "OPERATOR" | "VIEWER";
-export interface Team { id: string; name: string; role: Role; members?: number }
-export interface User { id: string; name: string; email: string }
+export interface Team { id: string; name: string; role: Role; members?: number; avatar_url?: string | null }
+export interface User { id: string; name: string; email: string; avatar_url?: string | null }
 export interface Session { token: string; user: User; team: Team; teams: Team[]; developer: boolean }
 
 export class ApiError extends Error {
@@ -119,6 +119,27 @@ export async function signIn(email: string): Promise<Session> {
   const result = await api<{ token: string; user: User; teams: Team[]; developer: boolean }>("/api/session", { method: "POST", body: { email }, auth: false });
   if (!result.teams.length) throw new ApiError("This user has no team. Developers use the Developer Console.", 0);
   return { token: result.token, user: result.user, team: result.teams[0], teams: result.teams, developer: result.developer };
+}
+
+interface Profile { user: User; teams: Team[]; developer: boolean }
+
+/** Re-reads the person's profile, so a picture or team changed elsewhere shows without signing in again. */
+export async function refreshProfile(s: Session): Promise<Session> {
+  const p = await api<Profile>("/api/me");
+  const team = p.teams.find((t) => t.id === s.team.id) || s.team;
+  return { ...s, user: p.user, teams: p.teams, team, developer: p.developer };
+}
+
+export type PictureOwner = "me" | "team";
+export const PICTURE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
+
+/** Sets or removes the picture for the signed-in person or the current organisation. Returns its new URL. */
+export async function setPicture(owner: PictureOwner, file: File | null): Promise<string | null> {
+  const path = `/api/${owner}/avatar`;
+  if (!file) return (await api<{ avatar_url: null }>(path, { method: "DELETE" })).avatar_url;
+  const form = new FormData();
+  form.append("file", file);
+  return (await api<{ avatar_url: string }>(path, { method: "PUT", form })).avatar_url;
 }
 
 export async function upload(file: File): Promise<{ id: string }> {
