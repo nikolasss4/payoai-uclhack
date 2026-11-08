@@ -105,14 +105,18 @@ def answer(run_id: str, team_id: str, value, turn_id: str | None = None) -> dict
     """Resumes a Waiting Run. Anything outside the allowed answers is rejected."""
     with tx() as conn:
         row = fetch_one(conn, "SELECT * FROM routine_runs WHERE id = %s AND team_id = %s", (run_id, team_id))
-        pending = row and fetch_one(conn, "SELECT * FROM run_questions WHERE run_id = %s AND status = 'OPEN' ORDER BY created_at DESC LIMIT 1", (run_id,))
+        # Locked, so a double tap or repeated answer can't resume the run twice.
+        pending = row and fetch_one(conn, "SELECT * FROM run_questions WHERE run_id = %s AND status = 'OPEN' ORDER BY created_at DESC LIMIT 1 FOR UPDATE", (run_id,))
         if not pending:
             raise InvalidAnswer("This run isn't waiting for an answer.")
         allowed = [o["value"] for o in pending["options"]]
         if allowed and value not in allowed:
             raise InvalidAnswer(f"Allowed answers: {allowed}")
         conn.execute("UPDATE run_questions SET status = 'ANSWERED', answer = %s WHERE id = %s", (Jsonb(value), pending["id"]))
-        conn.execute("UPDATE routine_runs SET status = 'RUNNING', updated_at = now() WHERE id = %s", (run_id,))
+        try:
+            conn.execute("UPDATE routine_runs SET status = 'RUNNING', updated_at = now() WHERE id = %s", (run_id,))
+        except UniqueViolation as exc:
+            raise RoutineBusy("Another step is still running in this chat.") from exc
     return _drive(row, Command(resume=value))
 
 
@@ -171,9 +175,10 @@ def _finish(run_id: str, values: dict) -> dict:
         "obligation_id": values.get("obligation_id"),
         "intent_id": values.get("intent_id"),
         "approval_id": values.get("approval_id"),
+        "source_account_note": values.get("source_account_note"),
         **(values.get("result") or {}),
     }
-    status = "AWAITING_APPROVAL" if values.get("approval_id") else "COMPLETED"
+    status = "AWAITING_APPROVAL" if values.get("approval_id") else "AWAITING_DOCUMENT" if result.get("awaiting_document") else "COMPLETED"
     with tx() as conn:
         conn.execute("UPDATE routine_runs SET status = %s, result = %s, updated_at = now() WHERE id = %s", (status, Jsonb(result), run_id))
     return {"run_id": run_id, "status": status, **result}

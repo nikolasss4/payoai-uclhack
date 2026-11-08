@@ -13,6 +13,7 @@ import httpx
 from payoai.agent import llm
 from payoai.agent.config import STEPS, cost_micros
 from payoai.db import Jsonb, fetch_one, new_id, tx
+from payoai.memory import preferences_for
 from payoai.domain.money import format_minor, payload_hash, to_minor
 from payoai.queue import enqueue
 from payoai.routines.nodes.common import RunState, node, question
@@ -175,11 +176,12 @@ def verify_research_quotes(state: RunState, ctx) -> dict:
 
 @node("Filter and Rank")
 def filter_and_rank(state: RunState, ctx) -> dict:
-    """A visible rubric: known total within budget first, then preferred merchant, then lowest price."""
+    """A visible rubric: known total within budget first, then preferred merchant, then saved preference, then lowest price."""
     result, inputs = state["result"], state["inputs"]
     asset = inputs.get("asset", "GBP")
     budget = result["budget_minor"]
     preferred = {m.lower() for m in inputs.get("preferred_merchants", [])}
+    saved = preferences_for(state["team_id"], state.get("actor"), ("merchant_preference",))
     ranked, over, unknown = [], [], []
     for candidate in result.get("candidates", []):
         try:
@@ -194,17 +196,28 @@ def filter_and_rank(state: RunState, ctx) -> dict:
         elif price + delivery > budget:
             over.append(item)
         else:
-            item["score"] = {"preferred_merchant": candidate.get("merchant", "").lower() in preferred, "total": format_minor(price + delivery, asset)}
+            matched = [m["id"] for m in saved if _fits_preference(m, candidate)]
+            item["score"] = {"preferred_merchant": candidate.get("merchant", "").lower() in preferred, "saved_preference": bool(matched), "saved_preference_ids": matched, "total": format_minor(price + delivery, asset)}
             ranked.append(item)
-    ranked.sort(key=lambda c: (not c["score"]["preferred_merchant"], c["total_minor"]))
+    ranked.sort(key=lambda c: (not c["score"]["preferred_merchant"], not c["score"]["saved_preference"], c["total_minor"]))
     report_id = new_id("rpt")
-    rubric = "Known total within budget first, then preferred merchant, then lowest total."
+    rubric = "Known total within budget first, then preferred merchant, then a saved merchant preference, then lowest total."
     with tx() as conn:
         conn.execute(
             "INSERT INTO research_reports (id, team_id, run_id, constraints, candidates, coverage) VALUES (%s, %s, %s, %s, %s, %s)",
             (report_id, state["team_id"], state["run_id"], Jsonb(inputs), Jsonb(ranked), Jsonb({"not_covered": result.get("not_covered"), "pages": result.get("pages"), "unconfirmed_delivery": unknown, "over_budget": over, "dropped": result.get("dropped")})),
         )
     return {"result": {"report_id": report_id, "rubric": rubric, "ranked": ranked, "unconfirmed_delivery": unknown, "over_budget": over, "dropped": result.get("dropped"), "not_covered": result.get("not_covered"), "budget": format_minor(budget, asset)}}
+
+
+def _fits_preference(memory: dict, candidate: dict) -> bool:
+    """Exact facts only. A preference can reorder what passed, and never brings back what failed."""
+    value = memory["value"] or {}
+    merchant = str(value.get("merchant") or memory.get("subject") or "").strip().lower()
+    if merchant and merchant == str(candidate.get("merchant") or "").strip().lower():
+        return True
+    host = urlparse(str(candidate.get("url") or "")).hostname or ""
+    return value.get("prefer") == "uk_retailers" and host.endswith(".uk")
 
 
 # Checkout. Scripts match a supported merchant's fixed form or stop, so no page text can steer them.
@@ -293,10 +306,15 @@ def execute_checkout(team_id: str, purchase_id: str) -> dict:
     run_id = new_id("run")
     with tx() as conn:
         purchase = fetch_one(conn, "SELECT * FROM purchase_summaries WHERE id = %s AND team_id = %s", (purchase_id, team_id))
+        if purchase is None:
+            return {"status": "STOPPED", "reason": "That purchase isn't in this team."}
+        paused = fetch_one(conn, "SELECT payments_paused FROM team_controls WHERE team_id = %s", (team_id,))
         conn.execute("INSERT INTO routine_runs (id, team_id, routine, trigger_type, inputs, status) VALUES (%s, %s, 'execute_checkout', 'TAP', %s, 'RUNNING')", (run_id, team_id, Jsonb({"purchase_id": purchase_id})))
     ctx = TraceContext(team_id, run_id=run_id)
     if purchase["order_status"] != "APPROVED":
         return _checkout_result(run_id, purchase_id, {"status": purchase["order_status"]})
+    if paused and paused["payments_paused"]:
+        return _checkout_result(run_id, purchase_id, {"status": "STOPPED", "reason": "New payments are paused for this team."}, "STOPPED")
     cart_id = purchase["summary"]["cart_id"]
     try:
         with step(ctx, "NODE", "Re-read Summary", {"purchase_id": purchase_id}) as s:
@@ -308,7 +326,10 @@ def execute_checkout(team_id: str, purchase_id: str) -> dict:
         return _checkout_result(run_id, purchase_id, {"status": "NEEDS_REAPPROVAL", "reason": "The final summary changed after approval, so that approval no longer applies.", "new_total": format_minor(current["total_minor"], "GBP")}, "NEEDS_REAPPROVAL")
     token = os.environ.get("TEST_CARD_TOKEN", "test_card_token")
     with tx() as conn:
-        conn.execute("UPDATE purchase_summaries SET order_status = 'SUBMITTING' WHERE id = %s", (purchase_id,))
+        # Only one run can move this on, so a repeated job can't place a second order.
+        claimed = fetch_one(conn, "UPDATE purchase_summaries SET order_status = 'SUBMITTING' WHERE id = %s AND order_status = 'APPROVED' RETURNING id", (purchase_id,))
+    if claimed is None:
+        return _checkout_result(run_id, purchase_id, {"status": "ALREADY_SUBMITTED"})
     with step(ctx, "PROVIDER_CALL", "Submit Order", {"purchase_id": purchase_id}) as s:
         try:
             response = httpx.post(f"{merchant_url()}/order/{cart_id}", json={"payment_token": token}, timeout=20)

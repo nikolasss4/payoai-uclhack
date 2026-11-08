@@ -65,7 +65,7 @@ def preferences_for(team_id: str, user_id: str | None, types: tuple[str, ...] | 
             SELECT id, type, subject, value, origin FROM memories
             WHERE team_id = %s AND status = 'ACTIVE' AND (user_id IS NULL OR user_id = %s)
               AND (%s::text[] IS NULL OR type = ANY(%s)) AND (%s::text IS NULL OR subject = %s)
-            ORDER BY created_at DESC LIMIT %s
+            ORDER BY user_id IS NULL, created_at DESC LIMIT %s
             """,
             (team_id, user_id, list(types) if types else None, list(types) if types else None, subject, subject, MAX_PREFERENCES),
         )
@@ -73,18 +73,44 @@ def preferences_for(team_id: str, user_id: str | None, types: tuple[str, ...] | 
 
 
 def record_observation(team_id: str, user_id: str, memory_type: str, subject: str, value: dict, event_id: str) -> str | None:
-    """Repeated actions: code counts them and saves after 3 consistent ones. Only runs in Auto Mode."""
+    """Repeated actions: code counts them and saves after 3 consistent ones. Only runs in Auto Mode.
+
+    Acting against a memory resets its count at once, and it stays until the new behaviour has
+    repeated enough to replace it. Actions from before the latest saved or undone memory don't count.
+    """
     if not auto_mode(team_id) or memory_type not in AUTO_ALLOWED:
         return None
     with tx() as conn:
+        active = fetch_one(
+            conn,
+            "SELECT id, value FROM memories WHERE team_id = %s AND type = %s AND subject IS NOT DISTINCT FROM %s AND user_id = %s AND status = 'ACTIVE'",
+            (team_id, memory_type, subject, user_id),
+        )
+        if active and active["value"] == value:
+            conn.execute("UPDATE memories SET evidence_count = evidence_count + 1 WHERE id = %s", (active["id"],))
+            return active["id"]
+        if active:
+            conn.execute("UPDATE memories SET evidence_count = 0 WHERE id = %s", (active["id"],))
+        since = fetch_one(conn, "SELECT max(created_at) AS at FROM memories WHERE team_id = %s AND type = %s AND subject IS NOT DISTINCT FROM %s AND user_id = %s", (team_id, memory_type, subject, user_id))["at"]
         recent = fetch_all(
             conn,
-            "SELECT data FROM audit_events WHERE team_id = %s AND actor_id = %s AND event_type = 'MemoryObservation' AND entity_type = %s AND entity_id = %s ORDER BY id DESC LIMIT %s",
-            (team_id, user_id, memory_type, subject, OBSERVED_THRESHOLD),
+            """
+            SELECT data FROM audit_events
+            WHERE team_id = %s AND actor_id = %s AND event_type = 'MemoryObservation' AND entity_type = %s AND entity_id = %s
+              AND (%s::timestamptz IS NULL OR created_at > %s)
+            ORDER BY id DESC LIMIT 50
+            """,
+            (team_id, user_id, memory_type, subject, since, since),
         )
-    if len(recent) < OBSERVED_THRESHOLD or any(r["data"].get("value") != value for r in recent):
+    # The unbroken run of this value, counting each record once, so re-saving one expense isn't three actions.
+    sources = set()
+    for row in recent:
+        if row["data"].get("value") != value:
+            break
+        sources.add(row["data"].get("source") or row["data"].get("id"))
+    if len(sources) < OBSERVED_THRESHOLD:
         return None
-    return save(team_id, user_id, memory_type, subject, value, "observed", [event_id], evidence_count=len(recent))
+    return save(team_id, user_id, memory_type, subject, value, "observed", [event_id, *sorted(s for s in sources if s)], evidence_count=len(sources))
 
 
 def auto_mode(team_id: str) -> bool:

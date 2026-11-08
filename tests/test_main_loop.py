@@ -55,7 +55,7 @@ def turn_with(biz, script, text="hi", role="OPERATOR", chat_id=None):
 
 
 def test_answers_with_read_tools_and_no_tool_can_write(biz):
-    result = turn_with(biz, Script(("search_counterparties", {"name": "Figma"}), "Figma is on file."))
+    result = turn_with(biz, Script(("search_counterparties", {"name": "Examplo"}), "Examplo is on file."))
     assert result["status"] == "COMPLETED"
     names = {t["name"] for t in main_loop.tool_definitions()}
     for forbidden in ("approve", "execute_payment", "submit_approved_payment", "verify_destination", "override_check", "execute"):
@@ -63,15 +63,15 @@ def test_answers_with_read_tools_and_no_tool_can_write(biz):
 
 
 def test_main_loop_cannot_pass_bank_details(biz):
-    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Figma", "amount": "4800", "asset": "GBP", "iban": FRAUD_IBAN}}), "Refused.")
+    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Examplo", "amount": "4800", "asset": "GBP", "iban": FRAUD_IBAN}}), "Refused.")
     turn_with(biz, script)
     assert "REFUSED" in str(script.inputs[1])
     with pytest.raises(ValueError):
-        routine_inputs.validate("pay_someone", {"counterparty_name": f"Figma {FRAUD_IBAN}", "amount": "1", "asset": "GBP"})
+        routine_inputs.validate("pay_someone", {"counterparty_name": f"Examplo {FRAUD_IBAN}", "amount": "1", "asset": "GBP"})
 
 
 def test_start_confirmation_stops_a_money_routine_starting(biz):
-    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Figma", "amount": "480", "asset": "GBP", "purpose": "Seats"}}), "Tap the card to start.")
+    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Examplo", "amount": "480", "asset": "GBP", "purpose": "Seats"}}), "Tap the card to start.")
     turn_with(biz, script)
     with tx() as conn:
         assert fetch_one(conn, "SELECT count(*) AS n FROM start_confirmations WHERE team_id = %s AND status = 'PENDING'", (biz["team"]["id"],))["n"] == 1
@@ -80,7 +80,7 @@ def test_start_confirmation_stops_a_money_routine_starting(biz):
 
 
 def test_viewer_is_refused_by_code(biz):
-    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Figma", "amount": "480", "asset": "GBP"}}), "You can't.")
+    script = Script(("start_routine", {"routine": "pay_someone", "inputs": {"counterparty_name": "Examplo", "amount": "480", "asset": "GBP"}}), "You can't.")
     turn_with(biz, script, role="VIEWER")
     assert "role can't" in str(script.inputs[1])
 

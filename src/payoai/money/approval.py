@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from payoai.db import fetch_one, tx
+from payoai.money.locks import lock_obligation
 from payoai.queue import enqueue
 from payoai.routines.nodes.decision import notify_approvers
 from payoai.trace import TraceContext, audit, step
@@ -32,13 +33,14 @@ def decide(team_id: str, user_id: str, approval_id: str, shown_hash: str, decisi
         elif decision == "APPROVED" and row["status"] == "PENDING" and row["requires_review"] and not reviewed:
             result = DecisionResult(False, row["status"], "This payment needs review. Open it and clear the warnings first.")
         else:
-            result = _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, s.id)
+            result = _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, reviewed, s.id)
         s.output = {"won": result.won, "status": result.status, "message": result.message}
     return result
 
 
-def _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, step_id) -> DecisionResult:
+def _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, reviewed, step_id) -> DecisionResult:
     with tx() as conn:
+        lock_obligation(conn, fetch_one(conn, "SELECT obligation_id FROM payment_intents WHERE id = %s", (row["intent_id"],))["obligation_id"])
         won = fetch_one(
             conn,
             """
@@ -47,9 +49,10 @@ def _apply(team_id, user_id, row, approval_id, shown_hash, decision, reason, ste
               AND (a.expires_at > now() OR %(decision)s = 'REJECTED')
               AND EXISTS (SELECT 1 FROM memberships m WHERE m.team_id = a.team_id AND m.user_id = %(user)s AND m.role = 'APPROVER')
               AND (%(decision)s = 'REJECTED' OR NOT EXISTS (SELECT 1 FROM team_controls c WHERE c.team_id = a.team_id AND c.payments_paused))
+              AND (%(decision)s = 'REJECTED' OR %(reviewed)s OR NOT EXISTS (SELECT 1 FROM payment_intents p WHERE p.id = a.intent_id AND p.requires_review))
             RETURNING a.id, a.intent_id
             """,
-            {"decision": decision, "user": user_id, "reason": reason, "id": approval_id, "team": team_id, "hash": shown_hash},
+            {"decision": decision, "user": user_id, "reason": reason, "id": approval_id, "team": team_id, "hash": shown_hash, "reviewed": reviewed},
         )
         if won:
             intent_id = won["intent_id"]
@@ -84,7 +87,10 @@ def _why_not(conn, team_id, user_id, approval_id, shown_hash, decision) -> Decis
         return DecisionResult(False, now["status"], "The payment changed since this screen loaded. Review it again.")
     if now["expired"]:
         return DecisionResult(False, "EXPIRED", "This approval has expired. Prepare the payment again.")
-    return DecisionResult(False, now["status"], "New payments are paused for this team.")
+    paused = fetch_one(conn, "SELECT payments_paused FROM team_controls WHERE team_id = %s", (team_id,))
+    if paused and paused["payments_paused"]:
+        return DecisionResult(False, now["status"], "New payments are paused for this team.")
+    return DecisionResult(False, now["status"], "This payment needs review. Open it and clear the warnings first.")
 
 
 def cancel_pending(conn, intent_id: str) -> bool:

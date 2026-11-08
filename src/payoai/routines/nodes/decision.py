@@ -1,11 +1,13 @@
 """Decide, Investigate, Explain and Prepare Payment. LLM Nodes never change a result or a state."""
 
+import os
 from datetime import datetime, timedelta, timezone
 
 from payoai.agent import llm
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.domain.decide import POLICY_VERSION, combine
 from payoai.domain.money import canonical_payload, format_minor, payload_hash
+from payoai.money.locks import lock_obligation
 from payoai.routines.nodes.checks import fee_cap
 from payoai.routines.nodes.common import RunState, node
 from payoai.trace import audit
@@ -31,6 +33,20 @@ INVESTIGATION_SCHEMA = {
     "required": ["findings"],
 }
 EXPLAIN_SCHEMA = {"type": "object", "properties": {"explanation": {"type": "string"}}, "required": ["explanation"]}
+
+
+def investigate_enabled() -> bool:
+    """INVESTIGATE_OFF lets the benchmark compare with and without Investigate. It can't change a decision."""
+    return os.environ.get("INVESTIGATE_OFF", "").strip().lower() not in ("1", "true", "yes", "on")
+
+
+def can_prepare(state: RunState) -> bool:
+    """Only eligible or reviewable payments, with nothing unanswered. A person can't review away a missing fact."""
+    if state.get("decision") not in ("ELIGIBLE_FOR_APPROVAL", "NEEDS_REVIEW"):
+        return False
+    if any(r["outcome"] == "NEEDS_INFORMATION" for r in state.get("reasons") or []):
+        return False
+    return bool(state.get("destination_id") and state.get("source_account_id") and state.get("amount_minor"))
 
 
 @node("Decide", step_type="DECISION")
@@ -84,7 +100,9 @@ def _related_records(state: RunState) -> dict:
     with tx() as conn:
         bills = fetch_all(conn, "SELECT id, invoice_reference, amount_minor, asset, status, period, due_date, description FROM obligations WHERE team_id = %s AND counterparty_id = %s AND id <> %s ORDER BY created_at DESC LIMIT 12", (team, counterparty, state["obligation_id"]))
         contracts = fetch_all(conn, "SELECT id, kind, value, added_at FROM contact_channels WHERE team_id = %s AND counterparty_id = %s AND kind = 'contract'", (team, counterparty))
-    return {"earlier_bills": bills, "contracts": contracts}
+    # The model quotes what it sees, so it gets money as people read it, never in minor units.
+    readable = [{**{k: v for k, v in b.items() if k not in ("amount_minor", "asset")}, "amount": format_minor(int(b["amount_minor"]), b["asset"]) if b["amount_minor"] is not None and b["asset"] else None} for b in bills]
+    return {"earlier_bills": readable, "contracts": contracts}
 
 
 def _jsonable(value):
@@ -155,38 +173,50 @@ def prepare_payment(state: RunState, ctx) -> dict:
     """Builds the exact payment and its hash. Blocked bills and unanswered questions get nothing."""
     team = state["team_id"]
     with tx() as conn:
+        lock_obligation(conn, state["obligation_id"])
+        obligation = fetch_one(conn, "SELECT * FROM obligations WHERE id = %s AND team_id = %s", (state["obligation_id"], team))
+        if obligation["status"] in ("SUPERSEDED", "CANCELLED", "PAID", "PAYMENT_IN_PROGRESS", "OUTCOME_UNKNOWN", "BLOCKED"):
+            return {"stop": f"This bill's status changed to {obligation['status']}, so no payment was prepared."}
+        moved = fetch_one(conn, "SELECT id, status FROM payment_intents WHERE obligation_id = %s AND status <> ALL(%s) LIMIT 1", (obligation["id"], ["FAILED", "REJECTED", "CANCELLED"]))
+        if moved:
+            return {"stop": f"This bill already has a payment that is {moved['status']}, so no second one was prepared."}
+        if obligation["mandate_id"]:
+            # Pausing or revoking only cancels what exists, so a run in progress must check again here.
+            mandate = fetch_one(conn, "SELECT status FROM mandates WHERE id = %s AND team_id = %s", (obligation["mandate_id"], team))
+            if mandate is None or mandate["status"] != "ACTIVE":
+                return {"stop": "This Mandate is no longer active, so no payment was prepared."}
         destination = fetch_one(conn, "SELECT * FROM payment_destinations WHERE id = %s AND team_id = %s AND status = 'VERIFIED'", (state["destination_id"], team))
         account = fetch_one(conn, "SELECT * FROM financial_accounts WHERE id = %s AND team_id = %s", (state["source_account_id"], team))
-        version = fetch_one(conn, "SELECT count(*) AS n FROM payment_intents WHERE obligation_id = %s", (state["obligation_id"],))["n"] + 1
+        if destination is None or account is None:
+            return {"stop": "The destination or source account is no longer valid."}
+        version = fetch_one(conn, "SELECT count(*) AS n FROM payment_intents WHERE obligation_id = %s", (obligation["id"],))["n"] + 1
         ttl = fetch_one(conn, "SELECT approval_ttl_hours FROM team_controls WHERE team_id = %s", (team,))["approval_ttl_hours"]
-        obligation = fetch_one(conn, "SELECT * FROM obligations WHERE id = %s", (state["obligation_id"],))
-    if destination is None or account is None:
-        return {"stop": "The destination or source account is no longer valid."}
-    reference = obligation["invoice_reference"] or obligation["id"]
-    max_fee = fee_cap(account["rail"])
-    canonical = canonical_payload(
-        team_id=team, source_account_id=account["id"], destination_id=destination["id"], destination_details=destination["details"],
-        rail=destination["rail"], provider=account["provider"], amount_minor=int(state["amount_minor"]), asset=state["asset"],
-        max_fee_minor=max_fee, obligation_id=obligation["id"], payment_reference=reference,
-        chain_id=destination["chain_id"], token_contract=destination["token_contract"],
-    )
-    digest = payload_hash(canonical)
-    intent_id, approval_id = new_id("pay"), new_id("apr")
-    warnings = [r["reason"] for r in state.get("reasons") or []]
-    if obligation["document_id"] is None:
-        warnings.append("No invoice attached.")
-    requires_review = state.get("decision") == "NEEDS_REVIEW"
-    with tx() as conn:
+        reference = obligation["invoice_reference"] or obligation["id"]
+        max_fee = fee_cap(account["rail"])
+        canonical = canonical_payload(
+            team_id=team, source_account_id=account["id"], destination_id=destination["id"], destination_details=destination["details"],
+            rail=destination["rail"], provider=account["provider"], amount_minor=int(state["amount_minor"]), asset=state["asset"],
+            max_fee_minor=max_fee, obligation_id=obligation["id"], payment_reference=reference,
+            chain_id=destination["chain_id"], token_contract=destination["token_contract"],
+        )
+        digest = payload_hash(canonical)
+        intent_id, approval_id = new_id("pay"), new_id("apr")
+        warnings = [r["reason"] for r in state.get("reasons") or []]
+        if obligation["document_id"] is None:
+            warnings.append("No invoice attached.")
+        # A note isn't a warning: it asks nothing of the Approver and doesn't require a review.
+        notes = [state["source_account_note"]] if state.get("source_account_note") else []
+        requires_review = state.get("decision") == "NEEDS_REVIEW"
         conn.execute(
             """
-            INSERT INTO payment_intents (id, team_id, obligation_id, counterparty_id, destination_id, source_account_id, run_id, rail, provider, amount_minor, asset, payment_reference, max_fee_minor, chain_id, token_contract, canonical, payload_hash, idempotency_key, warnings, requires_review, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'READY_FOR_APPROVAL')
+            INSERT INTO payment_intents (id, team_id, obligation_id, counterparty_id, destination_id, source_account_id, run_id, rail, provider, amount_minor, asset, payment_reference, max_fee_minor, chain_id, token_contract, canonical, payload_hash, idempotency_key, warnings, notes, requires_review, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'READY_FOR_APPROVAL')
             """,
             (
                 intent_id, team, obligation["id"], obligation["counterparty_id"], destination["id"], account["id"], state["run_id"],
                 destination["rail"], account["provider"], int(state["amount_minor"]), state["asset"], reference, max_fee,
                 destination["chain_id"], destination["token_contract"], Jsonb(canonical), digest, f"{team}-{obligation['id']}-v{version}",
-                Jsonb(warnings), requires_review,
+                Jsonb(warnings), Jsonb(notes), requires_review,
             ),
         )
         conn.execute(

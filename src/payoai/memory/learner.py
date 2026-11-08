@@ -2,7 +2,7 @@
 
 from payoai.agent import llm
 from payoai.db import Jsonb, fetch_one, new_id, tx
-from payoai.memory import AUTO_ALLOWED, MemoryRefused, auto_mode, save
+from payoai.memory import AUTO_ALLOWED, MemoryRefused, auto_mode, record_observation, save
 from payoai.trace import TraceContext, audit
 
 MAX_MESSAGE_CHARS = 500
@@ -45,6 +45,9 @@ def learn_from_turn(team_id: str, user_id: str, turn_id: str) -> list[str]:
         return []
     saved = []
     for candidate in data["candidates"]:
+        # The schema limits this too, but model output never decides what may be stored.
+        if candidate.get("type") not in AUTO_ALLOWED:
+            continue
         try:
             saved.append(save(team_id, user_id, candidate["type"], candidate.get("subject"), {"prefer": candidate["prefer"]}, "stated", [turn_id], ctx=TraceContext(team_id, turn_id=turn_id)))
         except MemoryRefused:
@@ -52,12 +55,17 @@ def learn_from_turn(team_id: str, user_id: str, turn_id: str) -> list[str]:
     return saved
 
 
-def observe(team_id: str, user_id: str, memory_type: str, subject: str, value: dict) -> None:
-    """Records a typed action, so code can count repeats. Only used in Auto Mode."""
-    if not auto_mode(team_id):
-        return
+def observe(team_id: str, user_id: str | None, memory_type: str, subject: str, value: dict, source_id: str | None = None) -> str | None:
+    """Records a typed action by a person, so code can count repeats. Only used in Auto Mode.
+
+    Returns the memory this action saved or strengthened, if any. Documents never call this.
+    """
+    if not user_id or user_id in ("SYSTEM", "AGENT") or memory_type not in AUTO_ALLOWED or not auto_mode(team_id):
+        return None
+    event_id = new_id("obs")
     with tx() as conn:
-        audit(conn, team_id, "USER", user_id, "MemoryObservation", memory_type, subject, {"value": value, "id": new_id("obs")})
+        audit(conn, team_id, "USER", user_id, "MemoryObservation", memory_type, subject, {"value": value, "id": event_id, "source": source_id})
+    return record_observation(team_id, user_id, memory_type, subject, value, event_id)
 
 
 __all__ = ["Jsonb"]

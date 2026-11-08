@@ -9,6 +9,7 @@ from payoai.db import fetch_all, fetch_one, tx
 from payoai.domain.money import format_minor
 from payoai.routines.nodes.checks import account_position
 from payoai.compliance.rules import uk_vat
+from payoai.trace import redact
 
 
 def _money(row: dict, field: str = "amount_minor") -> str | None:
@@ -64,7 +65,7 @@ def get_payment(team_id: str, payment_id: str) -> dict | None:
             return None
         approval = fetch_one(conn, "SELECT a.status, a.expires_at, a.decided_at, u.name AS decided_by FROM approvals a LEFT JOIN users u ON u.id = a.decided_by WHERE a.intent_id = %s ORDER BY a.created_at DESC LIMIT 1", (payment_id,))
         attempt = fetch_one(conn, "SELECT state, external_id, evidence_label, poll_count FROM payment_attempts WHERE intent_id = %s ORDER BY created_at DESC LIMIT 1", (payment_id,))
-    return {"id": p["id"], "counterparty": p["display_name"], "destination": p["masked_display"], "amount": _money(p), "status": p["status"], "warnings": p["warnings"], "approval": {**approval, "expires_at": str(approval["expires_at"]), "decided_at": str(approval["decided_at"])} if approval else None, "attempt": attempt}
+    return {"id": p["id"], "counterparty": p["display_name"], "destination": p["masked_display"], "amount": _money(p), "status": p["status"], "warnings": p["warnings"], "notes": p["notes"], "approval": {**approval, "expires_at": str(approval["expires_at"]), "decided_at": str(approval["decided_at"])} if approval else None, "attempt": attempt}
 
 
 def search_counterparties(team_id: str, name: str = "") -> list[dict]:
@@ -117,7 +118,8 @@ def get_run(team_id: str, run_id: str) -> dict | None:
         if not run:
             return None
         run["steps"] = fetch_all(conn, "SELECT name, step_type, status FROM trace_steps WHERE run_id = %s ORDER BY started_at", (run_id,))
-    return run
+    # Add Counterparty's inputs hold full details, which no Read Tool may return.
+    return {**run, "inputs": redact(run["inputs"]), "result": redact(run["result"])}
 
 
 def get_compliance_rules(team_id: str) -> dict:

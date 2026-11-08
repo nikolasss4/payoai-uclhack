@@ -1,6 +1,8 @@
 """Synthetic business data for the demo, tests and benchmark. All of it is invented.
 
-Addresses and account numbers are made up and belong to nobody.
+Addresses and account numbers are made up and belong to nobody: the IBANs use check digits 00, which
+no real IBAN has, and a bank code that doesn't exist, and the sort code and wallets are placeholders.
+The phone number is in the range Ofcom reserves for drama.
 """
 
 from datetime import date, timedelta
@@ -10,22 +12,22 @@ from payoai.providers.simulator import set_balance
 
 BASE_SEPOLIA = 84532
 SYNTHETIC_USDC = "0x" + "a1" * 20
-ALEX_WALLET = "0x7f3a9c2e41b8d6f05e1c7a93d2b4f8e6c0a1d3b5"
-POISONED_WALLET = "0x7f3a11111111111111111111111111111111d3b5"
-FIGMA_IBAN = "GB33BUKB20201555555555"
-FRAUD_IBAN = "GB94BARC10201530093459"
+ALEX_WALLET = "0x7f3a" + "0" * 32 + "d3b5"
+POISONED_WALLET = "0x7f3a" + "1" * 32 + "d3b5"
+EXAMPLO_IBAN = "GB00EXAM00000000000001"
+FRAUD_IBAN = "GB00FAKE00000000000002"
 
 
 def seed_business(team_id: str, approver_id: str, balances: dict | None = None) -> dict:
     """A fictional UK company with verified suppliers, a contractor paid in USDC, and two accounts."""
     balances = balances or {}
     today = date.today().isoformat()
-    ids = {k: new_id("cp") for k in ("figma", "alex", "cleaners")}
+    ids = {k: new_id("cp") for k in ("examplo", "alex", "cleaners")}
     gbp_external, usdc_external = f"ext_{team_id}_gbp", f"ext_{team_id}_usdc"
-    ids.update(gbp=new_id("acct"), usdc=new_id("acct"), figma_dest=new_id("dest"), alex_dest=new_id("dest"), cleaners_dest=new_id("dest"))
+    ids.update(gbp=new_id("acct"), usdc=new_id("acct"), examplo_dest=new_id("dest"), alex_dest=new_id("dest"), cleaners_dest=new_id("dest"))
     with tx() as conn:
         for key, name, legal, kind, labels, low, high in (
-            ("figma", "Figma", "Figma Design UK Ltd", "business", ["supplier"], 30000, 60000),
+            ("examplo", "Examplo", "Examplo Design UK Ltd", "business", ["supplier"], 30000, 60000),
             ("alex", "Alex Chen", "Alex Chen", "individual", ["contractor"], 250000000, 350000000),
             ("cleaners", "Brightside Cleaning", "Brightside Cleaning Ltd", "business", ["supplier"], 10000, 40000),
         ):
@@ -38,9 +40,9 @@ def seed_business(team_id: str, approver_id: str, balances: dict | None = None) 
                 (new_id("chn"), team_id, ids[key], "020 7946 0100"),
             )
         for key, cp, rail, asset, masked, details, chain, token in (
-            ("figma_dest", "figma", "FIAT_BANK", "GBP", "GB33…5555", {"iban": FIGMA_IBAN}, None, None),
+            ("examplo_dest", "examplo", "FIAT_BANK", "GBP", "GB00…0001", {"iban": EXAMPLO_IBAN}, None, None),
             ("alex_dest", "alex", "CRYPTO", "USDC", "0x7f3a…d3b5", {"address": ALEX_WALLET}, BASE_SEPOLIA, SYNTHETIC_USDC),
-            ("cleaners_dest", "cleaners", "FIAT_BANK", "GBP", "60-16-13 …6819", {"sort_code": "601613", "account_number": "31926819"}, None, None),
+            ("cleaners_dest", "cleaners", "FIAT_BANK", "GBP", "00-00-00 …0002", {"sort_code": "000000", "account_number": "00000002"}, None, None),
         ):
             conn.execute(
                 "INSERT INTO payment_destinations (id, team_id, counterparty_id, rail, asset, masked_display, details, chain_id, token_contract, status, source, added_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'VERIFIED', 'seed', %s)",
@@ -64,7 +66,7 @@ def seed_business(team_id: str, approver_id: str, balances: dict | None = None) 
     return ids
 
 
-def invoice_fields(invoice_number: str = "INV-1042", total: str = "480.00", subtotal: str = "400.00", vat: str = "80.00", payment: dict | None = None, supplier: str = "Figma Design UK Ltd", **overrides) -> dict:
+def invoice_fields(invoice_number: str = "INV-1042", total: str = "480.00", subtotal: str = "400.00", vat: str = "80.00", payment: dict | None = None, supplier: str = "Examplo Design UK Ltd", **overrides) -> dict:
     """What a correct extraction of a synthetic invoice looks like."""
     fields = {
         "supplier_name": supplier,
@@ -82,7 +84,7 @@ def invoice_fields(invoice_number: str = "INV-1042", total: str = "480.00", subt
         "vat_total": vat,
         "total": total,
         "line_items": [{"description": "Design software seats", "quantity": "4", "unit_price": "100.00", "net": subtotal, "vat_rate": "20", "vat": vat}],
-        "payment_details": payment if payment is not None else {"iban": FIGMA_IBAN},
+        "payment_details": payment if payment is not None else {"iban": EXAMPLO_IBAN},
         "quotes": [],
         "suspicious_text": [],
         "notes": None,

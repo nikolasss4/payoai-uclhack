@@ -6,7 +6,7 @@ from payoai.agent import llm
 from payoai.db import fetch_all, fetch_one, tx
 from payoai.fixtures import ALEX_WALLET, BASE_SEPOLIA, FRAUD_IBAN, POISONED_WALLET, SYNTHETIC_USDC, invoice_fields, render_invoice, seed_business, with_quotes
 from payoai.money import approval, execute, reconcile
-from payoai.providers.simulator import SimulatorProvider, ledger, set_balance, set_fault, sign_webhook
+from payoai.providers.simulator import ledger, set_balance, set_fault, sign_webhook
 from payoai.routines import engine
 from payoai.routines.nodes.documents import store_document
 
@@ -148,7 +148,7 @@ def test_non_vat_invoice_reports_nothing_missing(biz, fake_model):
 
 
 def test_unknown_supplier_stops_early(biz, fake_model):
-    result = pay_bill(biz, fake_model, invoice_fields("INV-U1", supplier="Figrna Design Ltd"))
+    result = pay_bill(biz, fake_model, invoice_fields("INV-U1", supplier="Exampl0 Design Ltd"))
     assert "known counterparty" in result["stop"]
     assert result["intent_id"] is None
 
@@ -171,13 +171,13 @@ def test_stale_balance_needs_review(biz, fake_model):
 def test_ambiguous_counterparty_pauses_then_resumes(biz, fake_model):
     team = biz["team"]
     with tx() as conn:
-        conn.execute("INSERT INTO counterparties (id, team_id, display_name, legal_name) VALUES (%s, %s, 'Figma', 'Figma Consulting Ltd')", (team["id"] + "_cp2", team["id"]))
-    fields = invoice_fields("INV-W1", supplier="Figma")
+        conn.execute("INSERT INTO counterparties (id, team_id, display_name, legal_name) VALUES (%s, %s, 'Examplo', 'Examplo Consulting Ltd')", (team["id"] + "_cp2", team["id"]))
+    fields = invoice_fields("INV-W1", supplier="Examplo")
     result = pay_bill(biz, fake_model, fields)
     assert result["status"] == "WAITING_ANSWER"
     with pytest.raises(engine.InvalidAnswer):
         engine.answer(result["run_id"], team["id"], "cp_made_up")
-    resumed = engine.answer(result["run_id"], team["id"], biz["figma"])
+    resumed = engine.answer(result["run_id"], team["id"], biz["examplo"])
     assert resumed["status"] == "AWAITING_APPROVAL", resumed
 
 
@@ -268,7 +268,7 @@ def test_revoked_destination_after_approval_stops_before_sending(biz, fake_model
     result = pay_bill(biz, fake_model, invoice_fields("INV-P10"))
     assert approve(biz, result).won
     with tx() as conn:
-        conn.execute("UPDATE payment_destinations SET status = 'REVOKED' WHERE id = %s", (biz["figma_dest"],))
+        conn.execute("UPDATE payment_destinations SET status = 'REVOKED' WHERE id = %s", (biz["examplo_dest"],))
     assert run_execute(biz, result)["status"] == "STOPPED"
 
 
@@ -276,7 +276,7 @@ def test_registered_bill_rechecks_on_payment(biz, fake_model):
     registered = pay_bill(biz, fake_model, invoice_fields("INV-R1"), routine="register_bill")
     assert registered["status"] == "COMPLETED" and registered["intent_id"] is None
     with tx() as conn:
-        conn.execute("UPDATE payment_destinations SET status = 'REVOKED' WHERE id = %s", (biz["figma_dest"],))
+        conn.execute("UPDATE payment_destinations SET status = 'REVOKED' WHERE id = %s", (biz["examplo_dest"],))
     team = biz["team"]
     later = engine.start("pay_bill", team["id"], {"obligation_id": registered["obligation_id"]}, "CHAT", actor=team["users"]["OPERATOR"])
     assert later["decision"] == "BLOCK"
@@ -327,6 +327,10 @@ def test_crash_after_recording_an_attempt_goes_to_unknown(biz, fake_model):
     from payoai.trace import TraceContext
 
     execute._record_attempt(TraceContext(biz["team"]["id"], run_id=result["run_id"]), intent, result["approval_id"])
+    # Just recorded, so it could still be sending in another run: nothing changes yet.
+    assert run_execute(biz, result)["status"] == "IN_PROGRESS"
+    with tx() as conn:
+        conn.execute("UPDATE payment_attempts SET created_at = now() - interval '11 minutes' WHERE intent_id = %s", (result["intent_id"],))
     assert run_execute(biz, result)["status"] == "UNKNOWN"
     assert ledger("INV-T4") == []
 
@@ -378,12 +382,4 @@ def test_webhooks_need_a_signature_and_duplicates_are_ignored(biz, fake_model):
     assert attempt_of(result)["state"] == "SUBMITTED"
 
 
-def test_cross_team_access_is_refused(biz, fake_model, team):
-    result = pay_bill(biz, fake_model, invoice_fields("INV-X1"))
-    other_team = team  # The same fixture value is fine for the owner check below.
-    assert other_team["id"] == biz["team"]["id"]
-    a = card(result)
-    assert approval.decide("team_someone_else", biz["team"]["users"]["APPROVER"], a["id"], a["payload_hash"], "APPROVED").status == "NOT_FOUND"
-    assert execute.execute.__name__ == "execute"
-    provider = SimulatorProvider()
-    assert provider.evidence_label == "SIMULATED"
+# Cross-team access has its own file, tests/test_cross_team.py.

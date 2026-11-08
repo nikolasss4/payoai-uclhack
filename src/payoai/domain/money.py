@@ -2,9 +2,12 @@
 
 import hashlib
 import json
+import re
 from decimal import Decimal, InvalidOperation
 
 DECIMALS = {"GBP": 2, "USD": 2, "EUR": 2, "USDC": 6}
+# Commas only as thousands separators, so "12,00" can't silently become 1200.
+PLAIN_AMOUNT = re.compile(r"^[+-]?((\d+|\d{1,3}(,\d{3})+)(\.\d*)?|\.\d+)$")
 
 
 def to_minor(amount: str | int | Decimal, asset: str) -> int:
@@ -13,8 +16,11 @@ def to_minor(amount: str | int | Decimal, asset: str) -> int:
         raise TypeError("money must not be a float")
     if asset not in DECIMALS:
         raise ValueError(f"unsupported asset {asset}")
+    text = format(amount, "f") if isinstance(amount, Decimal) and amount.is_finite() else str(amount).strip()
+    if not PLAIN_AMOUNT.match(text):
+        raise ValueError(f"invalid amount {amount!r}")
     try:
-        value = Decimal(str(amount).replace(",", "")) * (Decimal(10) ** DECIMALS[asset])
+        value = Decimal(text.replace(",", "")) * (Decimal(10) ** DECIMALS[asset])
     except InvalidOperation as exc:
         raise ValueError(f"invalid amount {amount!r}") from exc
     if value != value.to_integral_value():

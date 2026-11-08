@@ -2,6 +2,7 @@
 
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
 from payoai.money.approval import cancel_pending
+from payoai.money.locks import lock_obligation
 from payoai.routines.nodes.common import RunState, node
 from payoai.routines.nodes.decision import notify_approvers
 from payoai.trace import TraceContext, audit, step
@@ -103,8 +104,9 @@ def revoke_destination(team_id: str, user_id: str, destination_id: str, reason: 
         row = conn.execute("UPDATE payment_destinations SET status = 'REVOKED', revoked_at = now() WHERE id = %s AND team_id = %s RETURNING id", (destination_id, team_id)).fetchone()
         if row is None:
             raise VerificationRefused("That destination isn't in this team.")
-        intents = fetch_all(conn, "SELECT id, obligation_id FROM payment_intents WHERE destination_id = %s AND status = 'READY_FOR_APPROVAL'", (destination_id,))
+        intents = fetch_all(conn, "SELECT id, obligation_id FROM payment_intents WHERE destination_id = %s AND status = 'READY_FOR_APPROVAL' ORDER BY obligation_id", (destination_id,))
         for intent in intents:
+            lock_obligation(conn, intent["obligation_id"])
             if cancel_pending(conn, intent["id"]):
                 conn.execute("UPDATE payment_intents SET status = 'CANCELLED', updated_at = now() WHERE id = %s", (intent["id"],))
                 conn.execute("UPDATE obligations SET status = 'NEEDS_REVIEW', updated_at = now() WHERE id = %s", (intent["obligation_id"],))

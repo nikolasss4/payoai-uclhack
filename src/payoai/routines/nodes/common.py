@@ -44,6 +44,12 @@ class RunState(TypedDict, total=False):
     intent_id: str | None
     approval_id: str | None
     result: dict
+    mandate_id: str | None
+    period: str | None
+    occurrence_id: str | None
+    mandate_note: dict | None
+    allowed_destination_ids: list | None
+    source_account_note: dict | None
 
 
 def node(name: str, step_type: str = "NODE", trust_label: str = "TRUSTED"):
