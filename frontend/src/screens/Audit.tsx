@@ -4,6 +4,10 @@ import { useLive } from "../hooks";
 import { dayLabel, hm } from "../lib";
 import { ErrorLine, Icon, Skeleton } from "../ui";
 import { ACTOR, type AuditEntry } from "./Dashboard";
+import { TraceRow, type TraceEntry } from "./AuditTrace";
+
+type Entry = (AuditEntry & { kind?: "event" }) | TraceEntry;
+const isTrace = (e: Entry): e is TraceEntry => e.kind === "turn" || e.kind === "run";
 
 type Filter = "ALL" | "USER" | "AGENT" | "SYSTEM" | "PROVIDER";
 const FILTERS: [Filter, string][] = [["ALL", "All"], ["USER", "Person"], ["AGENT", "Agent"], ["SYSTEM", "System"], ["PROVIDER", "Provider"]];
@@ -11,19 +15,19 @@ const FILTERS: [Filter, string][] = [["ALL", "All"], ["USER", "Person"], ["AGENT
 export function Audit() {
   const { mobile, open } = useApp();
   const [filter, setFilter] = useState<Filter>("ALL");
-  const { data, error, loading } = useLive<{ total: number; entries: AuditEntry[] }>(`/api/audit?limit=300${filter === "ALL" ? "" : `&actor=${filter}`}`, 15000);
+  const { data, error, loading } = useLive<{ total: number; entries: Entry[] }>(`/api/audit?limit=300&traces=1${filter === "ALL" ? "" : `&actor=${filter}`}`, 15000);
   const entries = data?.entries || [];
-  const days: { label: string; entries: AuditEntry[] }[] = [];
+  const days: { label: string; entries: Entry[] }[] = [];
   for (const e of entries) {
     const l = dayLabel(e.at);
     if (!days.length || days[days.length - 1].label !== l) days.push({ label: l, entries: [] });
     days[days.length - 1].entries.push(e);
   }
-  const count = data ? `${data.total} ${data.total === 1 ? "entry" : "entries"} · newest first · append-only${data.total > entries.length ? ` · showing the latest ${entries.length}` : ""}` : "";
+  const count = data ? `${data.total} ${data.total === 1 ? "entry" : "entries"} · events, agent turns and routine runs · newest first · append-only${data.total > entries.length ? ` · showing the latest ${entries.length}` : ""}` : "";
 
-  const node = (e: AuditEntry, size: number) => (
+  const node = (e: Entry, size: number) => (
     <div style={{ width: size, height: size, flex: "none", borderRadius: "50%", display: "grid", placeItems: "center", background: e.actor_type === "AGENT" ? "var(--accent)" : "var(--raised)", color: e.actor_type === "AGENT" ? "#0B0B0C" : "var(--text)" }}>
-      <Icon name={ACTOR[e.actor_type]?.[0] || "circle"} size={size === 28 ? 16 : 15} fill />
+      <Icon name={isTrace(e) ? (e.kind === "turn" ? "auto_awesome" : "account_tree") : ACTOR[e.actor_type]?.[0] || "circle"} size={size === 28 ? 16 : 15} fill />
     </div>
   );
   const link = (e: AuditEntry, size: number) => e.record && (
@@ -31,7 +35,7 @@ export function Audit() {
   );
 
   return (
-    <div data-screen-label={mobile ? "M Audit" : "Audit"} style={mobile ? { display: "flex", flexDirection: "column", gap: 14 } : { padding: "28px 32px 64px", display: "flex", flexDirection: "column", gap: 18, maxWidth: 820 }}>
+    <div data-screen-label={mobile ? "M Audit" : "Audit"} style={mobile ? { display: "flex", flexDirection: "column", gap: 14 } : { padding: "28px 32px 64px", display: "flex", flexDirection: "column", gap: 18, maxWidth: 960 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: mobile ? 4 : 6 }}>
         <h1 className="display" style={{ margin: 0, fontSize: mobile ? 26 : 32, fontWeight: 600, letterSpacing: "-0.03em" }}>Audit</h1>
         <span style={{ fontSize: mobile ? 12.5 : 14, color: "var(--muted)" }}>{count}</span>
@@ -61,16 +65,26 @@ export function Audit() {
             {d.entries.map((e) => mobile ? (
               <div key={e.id} style={{ display: "grid", gridTemplateColumns: "26px minmax(0,1fr)", gap: "0 10px" }}>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>{node(e, 26)}<div style={{ flex: 1, width: 1, minHeight: 12, background: "var(--border)" }} /></div>
+                {isTrace(e) ? (
+                  <div style={{ minWidth: 0, padding: "0 0 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{hm(e.at)}</span>
+                    <TraceRow e={e} mobile />
+                  </div>
+                ) : (
                 <div style={{ minWidth: 0, padding: "3px 0 14px", display: "flex", flexDirection: "column", gap: 3 }}>
                   <span style={{ fontSize: 14 }}>{e.what}</span>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}><span className="mono">{hm(e.at)}</span> · {e.who} · {ACTOR[e.actor_type]?.[1]}</span>
                   {link(e, 12.5)}
                 </div>
+                )}
               </div>
             ) : (
               <div key={e.id} style={{ display: "grid", gridTemplateColumns: "52px 28px minmax(0,1fr)", gap: "0 14px" }}>
                 <span className="mono" style={{ fontSize: 12, color: "var(--muted)", paddingTop: 6, textAlign: "right" }}>{hm(e.at)}</span>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>{node(e, 28)}<div style={{ flex: 1, width: 1, minHeight: 14, background: "var(--border)" }} /></div>
+                {isTrace(e) ? (
+                  <div style={{ minWidth: 0, padding: "0 0 18px" }}><TraceRow e={e} mobile={false} /></div>
+                ) : (
                 <div style={{ minWidth: 0, padding: "4px 0 18px", display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontSize: 14.5 }}><span style={{ color: "var(--muted)" }}>{e.who} · </span>{e.what}</span>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -78,6 +92,7 @@ export function Audit() {
                     {link(e, 13)}
                   </div>
                 </div>
+                )}
               </div>
             ))}
           </div>

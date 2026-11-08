@@ -804,12 +804,27 @@ def mark_notifications_read(body: MarkRead, me: Member = Depends(member)):
 
 
 @app.get("/api/audit")
-def audit_log(actor: str | None = None, limit: int = Query(default=200, ge=1, le=500), me: Member = Depends(member)):
-    """The append-only audit record, newest first, with each entry linked to its record."""
+def audit_log(actor: str | None = None, limit: int = Query(default=200, ge=1, le=500), traces: bool = False, me: Member = Depends(member)):
+    """The append-only audit record, newest first, with each entry linked to its record.
+    With `traces`, agent turns and routine runs join the timeline, each openable to its steps."""
     if actor is not None and actor not in ("USER", "AGENT", "SYSTEM", "PROVIDER"):
         raise HTTPException(400, "actor must be USER, AGENT, SYSTEM or PROVIDER")
     with tx() as conn:
+        if traces:
+            return views.activity_feed(conn, me.team_id, actor, limit)
         return views.audit_feed(conn, me.team_id, actor, limit)
+
+
+@app.get("/api/audit/{kind}/{trace_id}")
+def audit_trace(kind: str, trace_id: str, me: Member = Depends(member)):
+    """Every step of one turn or run, in order, with the audit events each step wrote."""
+    if kind not in ("turn", "run"):
+        raise HTTPException(400, "kind must be turn or run")
+    with tx() as conn:
+        detail = views.trace_detail(conn, me.team_id, kind, trace_id)
+    if detail is None:
+        raise HTTPException(404)
+    return detail
 
 
 # Webhooks
