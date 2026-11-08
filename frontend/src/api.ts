@@ -87,6 +87,34 @@ export async function api<T = any>(path: string, { method = "GET", body, form, s
   return data as T;
 }
 
+/** Fetches a file with the session's headers and hands it to the browser as a download. */
+export async function download(path: string, fallbackName: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(path, { headers: authHeaders() });
+  } catch {
+    throw new ApiError("Can't reach the server. Check your connection and try again.", 0);
+  }
+  if (!response.ok) {
+    if (response.status === 401 && onUnauthorised) onUnauthorised();
+    let message = `That didn't work (error ${response.status}).`;
+    try {
+      const detail = (await response.json())?.detail;
+      if (typeof detail === "string") message = detail;
+    } catch { /* Keep the generic message. */ }
+    throw new ApiError(message, response.status);
+  }
+  const name = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "")?.[1] || fallbackName;
+  const url = URL.createObjectURL(await response.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export async function signIn(email: string): Promise<Session> {
   const result = await api<{ token: string; user: User; teams: Team[]; developer: boolean }>("/api/session", { method: "POST", body: { email }, auth: false });
   if (!result.teams.length) throw new ApiError("This user has no team. Developers use the Developer Console.", 0);
