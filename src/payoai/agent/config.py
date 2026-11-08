@@ -16,13 +16,14 @@ class StepConfig:
 
 
 STEPS = {
-    "main_loop": StepConfig(ARGON, "medium"),
-    "extract_fields": StepConfig(ARGON, "medium"),
-    "investigate": StepConfig(ARGON, "high", timeout_seconds=600),
+    "main_loop": StepConfig(FLASH, "low"),
+    "extract_fields": StepConfig(FLASH, "medium"),
+    "transcribe_document": StepConfig(FLASH, "low", timeout_seconds=120),
+    "investigate": StepConfig(FLASH, "high", timeout_seconds=600),
     "explain": StepConfig(FLASH, "low", timeout_seconds=60),
     "suggest_category": StepConfig(FLASH, "low", timeout_seconds=60),
     "draft_request": StepConfig(FLASH, "low", timeout_seconds=60),
-    "purchase_research": StepConfig(ARGON, "medium", timeout_seconds=600),
+    "purchase_research": StepConfig(FLASH, "medium", timeout_seconds=600),
     "memory_learner": StepConfig(FLASH_LITE, "minimal", timeout_seconds=60),
     "judge": StepConfig(ARGON, "high", timeout_seconds=600),
 }

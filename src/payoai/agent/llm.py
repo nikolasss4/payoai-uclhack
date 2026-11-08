@@ -56,6 +56,10 @@ def pdf_part(data: bytes) -> dict:
     return {"type": "document", "data": base64.b64encode(data).decode(), "mime_type": "application/pdf"}
 
 
+def image_part(data: bytes, mime_type: str) -> dict:
+    return {"type": "image", "data": base64.b64encode(data).decode(), "mime_type": mime_type}
+
+
 def call(
     step_name: str,
     parts: list[dict],

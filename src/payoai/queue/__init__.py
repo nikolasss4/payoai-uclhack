@@ -37,7 +37,10 @@ def claim(worker: str, kinds: list[str]) -> dict | None:
             WHERE id = (
                 SELECT id FROM jobs
                 WHERE status = 'QUEUED' AND kind = ANY(%s) AND run_at <= now()
-                ORDER BY (kind = 'run_turn') DESC, run_at
+                  AND NOT (kind = 'run_turn' AND EXISTS (
+                    SELECT 1 FROM jobs busy WHERE busy.kind = 'run_turn' AND busy.status = 'CLAIMED'
+                      AND busy.payload->>'chat_id' = jobs.payload->>'chat_id'))
+                ORDER BY (kind IN ('run_turn', 'run_routine')) DESC, run_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )

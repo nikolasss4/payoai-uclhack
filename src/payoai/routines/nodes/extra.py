@@ -316,7 +316,24 @@ def cash_analysis(state: RunState, ctx) -> dict:
                 shortfall_date = shortfall_date or bill["due_date"]
                 driving.append(bill["id"])
         confident = not (entry["stale"] or entry["unknown"])
+        # The same running position, day by day, so a chart shows figures from here and never works them out itself.
+        start = entry["available_minor"] - entry["in_flight_deducted_minor"] - entry["approved_minor"] - entry["reserve_minor"]
+        daily, position = [], start
+        for offset in range(days + 1):
+            day = today + timedelta(days=offset)
+            landing = [b for b in due if (b["due_date"] <= day if offset == 0 else b["due_date"] == day)]
+            position -= sum(int(b["amount_minor"]) for b in landing)
+            daily.append({
+                "date": str(day),
+                "position_minor": position,
+                "position": _signed(position, asset),
+                "ratio": round(max(position, 0) / start, 4) if start > 0 else 0,
+                "short": position < 0,
+                "bills": [b["invoice_reference"] or b["id"] for b in landing],
+            })
         results.append({
+            "daily": daily,
+            "start_position": _signed(start, asset),
             **entry,
             "bills_due_minor": due_minor,
             "bills_due": [{"id": b["id"], "invoice": b["invoice_reference"], "amount": format_minor(int(b["amount_minor"]), asset), "due_date": str(b["due_date"]), "status": b["status"]} for b in due],
@@ -334,6 +351,10 @@ def cash_analysis(state: RunState, ctx) -> dict:
     with tx() as conn:
         conn.execute("INSERT INTO cash_analyses (id, team_id, run_id, result) VALUES (%s, %s, %s, %s)", (analysis_id, team, state["run_id"], Jsonb(payload)))
     return {"result": {"analysis_id": analysis_id, **payload}}
+
+
+def _signed(minor: int, asset: str) -> str:
+    return f"−{format_minor(-minor, asset)}" if minor < 0 else format_minor(minor, asset)
 
 
 def _raise_alert(team, accounts, asset, shortfall_date, shortfall_minor, driving) -> None:

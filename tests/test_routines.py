@@ -535,3 +535,62 @@ def test_operator_cannot_approve_a_purchase(biz, shop):
     result = start(biz, "purchase_checkout", {"merchant": "Sample Office Supplies", "sku": "MON-24-FHD"})
     team = biz["team"]
     assert not purchases.approve_purchase(team["id"], team["users"]["OPERATOR"], result["purchase_id"], result["payload_hash"])["won"]
+
+
+def _image(fmt: str) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    out = BytesIO()
+    Image.new("RGB", (40, 20), "white").save(out, fmt)
+    return out.getvalue()
+
+
+def _docx(text: str) -> bytes:
+    import zipfile
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+
+    paragraphs = "".join(f"<w:p><w:r><w:t>{escape(line)}</w:t></w:r></w:p>" for line in text.splitlines())
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("word/document.xml", f'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}</w:body></w:document>')
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("filename, media_type, fmt", [("bill.png", "image/png", "PNG"), ("bill.jpg", "image/jpeg", "JPEG"), ("bill.gif", "image/gif", "GIF"), ("bill.bmp", "image/bmp", "BMP"), ("bill.tiff", "image/tiff", "TIFF")])
+def test_image_bills_are_transcribed_and_their_quotes_checked(biz, fake_model, filename, media_type, fmt):
+    fields = invoice_fields(f"IMG-{fmt}")
+    fake_model["fields"] = with_quotes(fields)
+    sent = []
+
+    def fake(step_name, parts, schema):
+        sent.append((step_name, parts[0]))
+        if step_name == "transcribe_document":
+            return render_invoice(fields)
+        return with_quotes(fields) if step_name == "extract_fields" else {"findings": []} if step_name == "investigate" else {"explanation": "ok"}
+
+    llm.set_fake(fake)
+    document_id = store_document(biz["team"]["id"], filename, media_type, _image(fmt), op(biz))
+    result = start(biz, "pay_bill", {"document_id": document_id})
+    assert result.get("status") != "STOPPED", result
+    image_parts = {step: part for step, part in sent if step in ("transcribe_document", "extract_fields")}
+    assert set(image_parts) == {"transcribe_document", "extract_fields"}
+    assert image_parts["extract_fields"]["type"] == "image"
+    assert image_parts["extract_fields"]["mime_type"] == (media_type if fmt in ("PNG", "JPEG") else "image/png")
+    with tx() as conn:
+        row = fetch_one(conn, "SELECT text_content FROM documents WHERE id = %s", (document_id,))
+        extraction = fetch_one(conn, "SELECT failed_quotes FROM extractions WHERE document_id = %s", (document_id,))
+    assert row["text_content"] == render_invoice(fields)
+    assert extraction["failed_quotes"] == []
+
+
+def test_word_bills_are_read_as_text(biz, fake_model):
+    fields = invoice_fields("DOCX-1")
+    fake_model["fields"] = with_quotes(fields)
+    document_id = store_document(biz["team"]["id"], "bill.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", _docx(render_invoice(fields)), op(biz))
+    start(biz, "pay_bill", {"document_id": document_id})
+    with tx() as conn:
+        extraction = fetch_one(conn, "SELECT failed_quotes FROM extractions WHERE document_id = %s", (document_id,))
+    assert extraction["failed_quotes"] == []

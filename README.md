@@ -23,10 +23,10 @@ These are the exact identifiers in `src/payoai/agent/config.py`, called through 
 
 | Step | Model | Thinking level |
 |---|---|---|
-| Main Loop | `gemini-4-argon` | `medium` |
-| Extract Fields | `gemini-4-argon` | `medium` |
-| Investigate | `gemini-4-argon` | `high` |
-| Purchase Research | `gemini-4-argon` | `medium` |
+| Main Loop | `gemini-3.8-flash` | `low` |
+| Extract Fields | `gemini-3.8-flash` | `medium` |
+| Investigate | `gemini-3.8-flash` | `high` |
+| Purchase Research | `gemini-3.8-flash` | `medium` |
 | LLM judge (evaluation only) | `gemini-4-argon` | `high` |
 | Explain, category suggestion, draft request | `gemini-3.8-flash` | `low` |
 | Auto Mode learner | `gemini-3.5-flash-lite` | `minimal` |
@@ -38,7 +38,7 @@ The model's output is checked by code at each point where it could matter, and a
 1. **Extraction.** The model must quote the document for each key field. Code confirms that each quote is in the document and contains the value. A failure gives `NEEDS_REVIEW`.
 2. **Decision.** Code Nodes run the checks and combine them. The model doesn't take part, and Memory isn't an input.
 3. **Findings.** Investigate may only add suggestions. A finding that cites no real record is dropped.
-4. **Replies.** Before a chat reply is shown, code checks that its figures appear in this Turn's tool results, and that words like "paid" match the record's status. A failed reply is regenerated once. A second failure shows the raw records instead.
+4. **Replies.** Before a chat reply is final, code checks that its figures appear in this Turn's tool results, and that words like "paid" match the record's status. While the reply streams, it is shown greyed out as an unchecked draft, with no Chips, and the checked reply replaces it. A draft that fails the check is withdrawn. A failed reply is regenerated once. A second failure shows the raw records instead. The thinking line above it shows the Main Loop's own steps, and the model's thought summaries when it gives any. Those are labelled as thinking and aren't checked.
 5. **Approval.** The Approver's tap carries the payment hash shown on screen. One database statement accepts it only if the approval is still pending, the hash matches, it hasn't expired, the person is still an Approver and payments aren't paused.
 6. **Execution.** Before sending, code recomputes the hash and re-checks authority, the destination and cash. The attempt is saved before anything is sent, and a timeout becomes `UNKNOWN` and is never resent.
 7. **Reconciliation.** The status comes from asking the provider directly. Code compares the amount, asset, recipient and reference with what was approved, and a mismatch goes to manual review.
@@ -47,7 +47,7 @@ Explain's wording isn't checked by code. In evaluation, an LLM judge scores a sa
 
 ## Run it
 
-You need Python 3.12, `uv`, a Postgres database and a Gemini API key. Copy the names from `.env.example` into these git-ignored files, and never commit values.
+You need Python 3.12, `uv`, Node 20 or later, a Postgres database and a Gemini API key. Copy the names from `.env.example` into these git-ignored files, and never commit values.
 
 | File | Used by | Names |
 |---|---|---|
@@ -61,10 +61,10 @@ The provider names in `.env.money` are for rails that aren't built, so they can 
 ```bash
 uv sync
 uv run python -m payoai.seed   # applies migrations and creates the synthetic demo company
-scripts/dev.sh                 # starts the API, three workers and the test shop
+scripts/dev.sh                 # builds the frontend if needed, then starts the API, three workers and the test shop
 ```
 
-The app is then at http://127.0.0.1:8000. To run the benchmark, see `deck/DATA.md` and `docs/evaluation.md`:
+The app is then at http://127.0.0.1:8000. It's a React app in `frontend/`, built into `web/dist` and served by the API. For frontend work, run `npm run dev` in `frontend/` (port 5173, with `/api` proxied to port 8000). The Developer Console is still the plain page at `/dev.html`. To run the benchmark, see `deck/DATA.md` and `docs/evaluation.md`:
 
 ```bash
 PYTHONPATH="$PWD:$PWD/src" uv run python -m evals.runner --suite routines --split dev

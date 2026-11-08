@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
@@ -12,13 +14,16 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from payoai.agent import chips, read_tools
+from payoai.api import views
 from payoai.db import Jsonb, fetch_all, fetch_one, new_id, tx
-from payoai.domain.money import format_minor
+from payoai.domain.money import DECIMALS, format_minor, to_minor
 from payoai.money import approval as approvals
 from payoai.money.reconcile import handle_webhook, resolve_manually
 from payoai.queue import enqueue
 from payoai.routines import accounting, contacts, purchases, recurring
-from payoai.routines.nodes.documents import store_document
+from payoai.providers.simulator import set_balance
+from payoai.routines.nodes.checks import refresh_balance
+from payoai.routines.nodes.documents import media_type_of, store_document
 from payoai.routines.registry import get_routine
 from payoai.settings import ROOT, load_env
 from payoai.trace import audit
@@ -88,7 +93,7 @@ def sign_in(body: SignIn):
         user = fetch_one(conn, "SELECT id, name, email FROM users WHERE email = %s", (body.email,))
         if user is None:
             raise HTTPException(404, "No demo user with that email.")
-        teams = fetch_all(conn, "SELECT t.id, t.name, m.role FROM memberships m JOIN teams t ON t.id = m.team_id WHERE m.user_id = %s AND NOT t.is_eval", (user["id"],))
+        teams = fetch_all(conn, "SELECT t.id, t.name, m.role, (SELECT count(*) FROM memberships x WHERE x.team_id = t.id) AS members FROM memberships m JOIN teams t ON t.id = m.team_id WHERE m.user_id = %s AND NOT t.is_eval ORDER BY t.name", (user["id"],))
         is_developer = fetch_one(conn, "SELECT 1 AS ok FROM platform_roles WHERE user_id = %s", (user["id"],)) is not None
     return {"token": _sign(user["id"]), "user": user, "teams": teams, "developer": is_developer}
 
@@ -96,7 +101,7 @@ def sign_in(body: SignIn):
 @app.get("/api/demo-users")
 def demo_users():
     with tx() as conn:
-        return fetch_all(conn, "SELECT u.name, u.email, m.role FROM users u JOIN memberships m ON m.user_id = u.id JOIN teams t ON t.id = m.team_id WHERE t.id = 'team_demo' ORDER BY m.role")
+        return fetch_all(conn, "SELECT u.name, u.email, m.role, t.name AS team_name FROM users u JOIN memberships m ON m.user_id = u.id JOIN teams t ON t.id = m.team_id WHERE t.id = 'team_demo' ORDER BY m.role, u.name")
 
 
 # Chat
@@ -118,7 +123,11 @@ def create_chat(me: Member = Depends(member)):
 @app.get("/api/chats")
 def list_chats(me: Member = Depends(member)):
     with tx() as conn:
-        return fetch_all(conn, "SELECT id, title, created_at FROM chats WHERE team_id = %s AND user_id = %s ORDER BY created_at DESC LIMIT 30", (me.team_id, me.user_id))
+        return fetch_all(
+            conn,
+            "SELECT c.id, c.title, c.created_at, COALESCE(max(t.started_at), c.created_at) AS last_at FROM chats c LEFT JOIN turns t ON t.chat_id = c.id WHERE c.team_id = %s AND c.user_id = %s GROUP BY c.id ORDER BY last_at DESC LIMIT 30",
+            (me.team_id, me.user_id),
+        )
 
 
 def _own_chat(conn, me: Member, chat_id: str) -> dict:
@@ -147,9 +156,12 @@ def send_turn(chat_id: str, body: NewTurn, me: Member = Depends(member)):
 
 
 def _render_event(team_id: str, event: dict) -> dict:
-    out = {"id": event["id"], "kind": event["kind"], "turn_id": event["turn_id"], "run_id": event["run_id"], "payload": event["payload"], "at": str(event["created_at"])}
+    out = {"id": event["id"], "kind": event["kind"], "turn_id": event["turn_id"], "run_id": event["run_id"], "payload": event["payload"], "at": views.iso(event["created_at"])}
     if event["kind"] == "REPLY":
         out["parts"] = chips.render(team_id, event["payload"].get("text", ""))
+    elif event["kind"] in ("START_CARD", "QUESTION", "STATUS"):
+        with tx() as conn:
+            out.update(views.event_extra(conn, team_id, event))
     return out
 
 
@@ -168,13 +180,16 @@ async def stream_events(chat_id: str, request: Request, after: int = 0, me: Memb
         _own_chat(conn, me, chat_id)
 
     async def generate():
-        last = after
+        last, quiet_since = after, time.monotonic()
         while not await request.is_disconnected():
             rows = await asyncio.to_thread(_events_after, chat_id, last)
             for row in rows:
                 last = row["id"]
                 yield f"data: {json.dumps(_render_event(me.team_id, row), default=str)}\n\n"
-            await asyncio.sleep(1)
+            if rows:
+                quiet_since = time.monotonic()
+            # Poll quickly while a Turn is streaming, and slowly once the chat goes quiet.
+            await asyncio.sleep(0.25 if time.monotonic() - quiet_since < 30 else 1)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -212,14 +227,20 @@ def decide_confirmation(confirmation_id: str, decision: str, me: Member = Depend
 async def upload_document(file: UploadFile = File(...), me: Member = Depends(member)):
     me.require("OPERATOR", "APPROVER")
     data = await file.read()
-    if file.content_type not in ("application/pdf", "text/plain", "image/png", "image/jpeg"):
-        raise HTTPException(415, "Upload a PDF, text file or image.")
-    return {"id": await asyncio.to_thread(store_document, me.team_id, file.filename or "document", file.content_type, data, me.user_id)}
+    filename = file.filename or "document"
+    media_type = media_type_of(filename, file.content_type)
+    if media_type is None:
+        raise HTTPException(415, "Upload a PDF, Word document (.docx), text file or image.")
+    try:
+        return {"id": await asyncio.to_thread(store_document, me.team_id, filename, media_type, data, me.user_id)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/bills")
 def bills(status: str | None = None, me: Member = Depends(member)):
-    return read_tools.list_bills(me.team_id, status)
+    with tx() as conn:
+        return views.bill_rows(conn, me.team_id, status)
 
 
 @app.get("/api/bills/{bill_id}")
@@ -227,7 +248,8 @@ def bill(bill_id: str, me: Member = Depends(member)):
     found = read_tools.get_bill(me.team_id, bill_id)
     if found is None:
         raise HTTPException(404, "Bill not found.")
-    return found
+    with tx() as conn:
+        return {**found, **views.bill_extra(conn, me.team_id, bill_id)}
 
 
 class Correction(BaseModel):
@@ -260,12 +282,14 @@ def _card(conn, row: dict, me: Member) -> dict:
         "rail": row["rail"], "asset": row["asset"], "chain_id": row["chain_id"], "token_contract": row["token_contract"], "source_account": row["account_name"],
         "amount": format_minor(int(row["amount_minor"]), row["asset"]), "max_fee": format_minor(int(row["max_fee_minor"]), row["asset"]), "reference": row["payment_reference"],
         "warnings": row["warnings"], "requires_review": row["requires_review"], "decision": decision, "checks": checks, "agent_suggestions": investigation["findings"] if investigation else [],
+        "suggestions": views.suggestions(conn, me.team_id, investigation["findings"] if investigation else []), "decided_reason": row["decided_reason"],
         "added_and_verified_by_same_person": bool(same_person and same_person["same_person_added"]), "expired": row["is_expired"], "can_decide": me.role == "APPROVER" and row["approval_status"] == "PENDING" and not row["is_expired"],
+        **views.approval_extra(conn, me.team_id, row),
     }
 
 
 CARD_SQL = """
-    SELECT p.*, a.id AS approval_id, a.status AS approval_status, a.expires_at, a.expires_at <= now() AS is_expired, a.decided_at, u.name AS decided_name, c.display_name AS counterparty,
+    SELECT p.*, a.id AS approval_id, a.status AS approval_status, a.expires_at, a.expires_at <= now() AS is_expired, a.decided_at, a.reason AS decided_reason, a.created_at AS approval_created_at, u.name AS decided_name, c.display_name AS counterparty,
            d.masked_display, d.status AS destination_status, f.name AS account_name
     FROM approvals a JOIN payment_intents p ON p.id = a.intent_id JOIN counterparties c ON c.id = p.counterparty_id
     JOIN payment_destinations d ON d.id = p.destination_id JOIN financial_accounts f ON f.id = p.source_account_id LEFT JOIN users u ON u.id = a.decided_by
@@ -335,7 +359,19 @@ def decide_batch(body: BatchDecision, me: Member = Depends(member)):
 
 @app.get("/api/payments")
 def payments(status: str | None = None, me: Member = Depends(member)):
-    return read_tools.list_payments(me.team_id, status)
+    """One row per payment, newest first, with the latest attempt's evidence label."""
+    with tx() as conn:
+        return views.payment_rows(conn, me.team_id, status)
+
+
+@app.get("/api/payments/{payment_id}/detail")
+def payment_detail(payment_id: str, me: Member = Depends(member)):
+    """Everything the payment trace shows, from source document to expense, read from the records."""
+    with tx() as conn:
+        found = views.payment_detail(conn, me.team_id, payment_id)
+    if found is None:
+        raise HTTPException(404, "Payment not found.")
+    return found
 
 
 @app.get("/api/payments/{payment_id}")
@@ -357,9 +393,10 @@ def confirmation(confirmation_id: str, me: Member = Depends(member)):
 
 @app.get("/api/chats/{chat_id}/turns")
 def chat_turns(chat_id: str, me: Member = Depends(member)):
+    """What the user typed, without the markers the app adds for the agent."""
     with tx() as conn:
         _own_chat(conn, me, chat_id)
-        return fetch_all(conn, "SELECT id, seq, user_input, status, started_at FROM turns WHERE chat_id = %s ORDER BY seq", (chat_id,))
+        return views.turn_rows(conn, me.team_id, chat_id)
 
 
 @app.post("/api/cash/analyse")
@@ -389,6 +426,8 @@ def resolve_attempt(attempt_id: str, body: dict, me: Member = Depends(member)):
     me.require("APPROVER")
     try:
         return resolve_manually(me.team_id, me.user_id, attempt_id, body.get("outcome", ""), body.get("evidence", ""))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -398,17 +437,94 @@ def balances(me: Member = Depends(member)):
     return {"balances": read_tools.get_balances(me.team_id), "alerts": read_tools.list_alerts(me.team_id)}
 
 
+# Accounts. The banks are fictional and every account runs on the simulator, so no real bank is ever contacted.
+
+BANKS = [
+    {"id": "hnbc", "name": "HNBC Bank", "available": True, "assets": ["GBP", "EUR", "USD"]},
+    {"id": "lords", "name": "Lords Bank", "available": True, "assets": ["GBP"]},
+    {"id": "barcls", "name": "Barcls Bank", "available": True, "assets": ["GBP", "EUR", "USD"]},
+    {"id": "natwist", "name": "NatWist", "available": False, "assets": []},
+    {"id": "santandor", "name": "Santandor", "available": False, "assets": []},
+    {"id": "monzu", "name": "Monzu", "available": False, "assets": []},
+]
+IN_FLIGHT = ["APPROVED", "SUBMITTING", "SUBMITTED", "PENDING", "UNKNOWN", "NEEDS_MANUAL_REVIEW"]
+
+
+@app.get("/api/banks")
+def list_banks(me: Member = Depends(member)):
+    return {"banks": BANKS}
+
+
+class NewAccount(BaseModel):
+    bank: str
+    asset: str = "GBP"
+    name: str | None = None
+    reserve: str = "0"
+
+
+@app.post("/api/accounts")
+def connect_account(body: NewAccount, me: Member = Depends(member)):
+    """Connects a simulated account at a fictional bank. It starts with a synthetic balance."""
+    me.require("APPROVER")
+    bank = next((b for b in BANKS if b["id"] == body.bank), None)
+    if bank is None:
+        raise HTTPException(404, "That bank isn't in the list.")
+    if not bank["available"]:
+        raise HTTPException(400, f"{bank['name']} is coming soon.")
+    if body.asset not in bank["assets"]:
+        raise HTTPException(400, f"{bank['name']} doesn't offer {body.asset} accounts.")
+    try:
+        reserve_minor = to_minor(body.reserve.strip() or "0", body.asset)
+    except ValueError as exc:
+        raise HTTPException(400, "Enter the reserve as an amount, such as 500 or 500.00.") from exc
+    if reserve_minor < 0:
+        raise HTTPException(400, "The reserve can't be negative.")
+    name = (body.name or "").strip()[:80] or f"{bank['name']} {body.asset} account"
+    account_id, external_id = new_id("acct"), new_id("sim")
+    set_balance(external_id, (5000 + secrets.randbelow(20001)) * 10 ** DECIMALS[body.asset])
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO financial_accounts (id, team_id, name, provider, rail, asset, external_id, reserve_minor) VALUES (%s, %s, %s, 'SIMULATOR', 'FIAT_BANK', %s, %s, %s)",
+            (account_id, me.team_id, name, body.asset, external_id, reserve_minor),
+        )
+        audit(conn, me.team_id, "USER", me.user_id, "AccountConnected", "account", account_id, {"name": name, "bank": bank["name"]})
+        account = fetch_one(conn, "SELECT * FROM financial_accounts WHERE id = %s", (account_id,))
+    refresh_balance(account)
+    return {"id": account_id, "name": name}
+
+
+@app.post("/api/accounts/{account_id}/disconnect")
+def disconnect_account(account_id: str, me: Member = Depends(member)):
+    """Takes an account out of the list. Its history stays, so past payments still show where they came from."""
+    me.require("APPROVER")
+    with tx() as conn:
+        account = fetch_one(conn, "SELECT id, name FROM financial_accounts WHERE id = %s AND team_id = %s AND status = 'ACTIVE'", (account_id, me.team_id))
+        if account is None:
+            raise HTTPException(404, "Account not found.")
+        busy = fetch_one(conn, "SELECT 1 AS busy FROM payment_intents WHERE source_account_id = %s AND status = ANY(%s) LIMIT 1", (account_id, IN_FLIGHT))
+        if busy:
+            raise HTTPException(409, "A payment from this account is still in progress. Remove it once that payment settles.")
+        conn.execute("UPDATE financial_accounts SET status = 'DISCONNECTED' WHERE id = %s", (account_id,))
+        audit(conn, me.team_id, "USER", me.user_id, "AccountDisconnected", "account", account_id, {"name": account["name"]})
+    return {"id": account_id, "status": "DISCONNECTED"}
+
+
 @app.get("/api/cash/latest")
 def cash_latest(me: Member = Depends(member)):
     with tx() as conn:
-        row = fetch_one(conn, "SELECT result, created_at FROM cash_analyses WHERE team_id = %s ORDER BY created_at DESC LIMIT 1", (me.team_id,))
-    return row or {}
+        row = fetch_one(conn, "SELECT id, result, created_at FROM cash_analyses WHERE team_id = %s ORDER BY created_at DESC LIMIT 1", (me.team_id,))
+        if row is None:
+            return {}
+        # Bills behind a shortfall, labelled from the live records.
+        for entry in row["result"].get("by_asset", []):
+            entry["driving"] = views.bill_rows_by_id(conn, me.team_id, entry.get("driving_bills") or [])
+    return {**row, "created_at": views.iso(row["created_at"])}
 
 
 @app.get("/api/controls")
 def get_controls(me: Member = Depends(member)):
     with tx() as conn:
-        return fetch_one(conn, "SELECT payments_paused, paused_at, auto_mode, approval_ttl_hours FROM team_controls WHERE team_id = %s", (me.team_id,))
+        return fetch_one(conn, "SELECT c.payments_paused, c.paused_at, u.name AS paused_by_name, c.auto_mode, c.approval_ttl_hours FROM team_controls c LEFT JOIN users u ON u.id = c.paused_by WHERE c.team_id = %s", (me.team_id,))
 
 
 @app.post("/api/controls/pause")
@@ -437,6 +553,26 @@ def set_auto_mode(body: dict, me: Member = Depends(member)):
 @app.get("/api/counterparties")
 def counterparties(name: str = "", me: Member = Depends(member)):
     return read_tools.search_counterparties(me.team_id, name)
+
+
+@app.get("/api/counterparties/{counterparty_id}")
+def counterparty(counterparty_id: str, me: Member = Depends(member)):
+    """A contact with masked destinations, channels on file and recent records. Full details need the audited route."""
+    with tx() as conn:
+        found = views.contact_detail(conn, me.team_id, counterparty_id)
+    if found is None:
+        raise HTTPException(404, "Contact not found.")
+    return found
+
+
+@app.get("/api/destinations/{destination_id}")
+def destination(destination_id: str, me: Member = Depends(member)):
+    """Masked details, where they came from and how they were verified."""
+    with tx() as conn:
+        found = views.destination_detail(conn, me.team_id, destination_id)
+    if found is None:
+        raise HTTPException(404, "Destination not found.")
+    return found
 
 
 @app.get("/api/counterparties/{counterparty_id}/channels")
@@ -519,8 +655,12 @@ def expense(expense_id: str, me: Member = Depends(member)):
         journal = fetch_all(conn, "SELECT kind, lines, reviewed FROM journal_proposals WHERE expense_id = %s", (expense_id,))
         for entry in journal:
             entry["lines"] = [{**line, "debit": _fmt(line.get("debit_minor"), line.get("asset")), "credit": _fmt(line.get("credit_minor"), line.get("asset"))} for line in entry["lines"]]
+        counterparty_id = next((v["counterparty_id"] for v in reversed(versions) if v["counterparty_id"]), None)
+        cp = counterparty_id and fetch_one(conn, "SELECT display_name FROM counterparties WHERE id = %s", (counterparty_id,))
         return {
-            "versions": [{**v, "gross": _fmt(v["gross_minor"], v["asset"]), "net": _fmt(v["net_minor"], v["asset"]), "tax": _fmt(v["tax_minor"], v["asset"])} for v in versions],
+            "id": expense_id,
+            "counterparty": cp["display_name"] if cp else None,
+            "versions": [{**v, "gross": _fmt(v["gross_minor"], v["asset"]), "net": _fmt(v["net_minor"], v["asset"]), "tax": _fmt(v["tax_minor"], v["asset"]), "created_at": views.iso(v["created_at"])} for v in versions],
             "journal": journal,
             "exceptions": fetch_all(conn, "SELECT kind, status, details FROM exceptions WHERE expense_id = %s", (expense_id,)),
             "label": "Prepared for accountant review, not certified compliant.",
@@ -573,8 +713,40 @@ def approve_purchase(purchase_id: str, body: dict, me: Member = Depends(member))
 
 @app.get("/api/notifications")
 def notifications(me: Member = Depends(member)):
+    """Newest first. Read state is per person, and each item links to the record it's about."""
     with tx() as conn:
-        return fetch_all(conn, "SELECT id, kind, payload, created_at, read_at FROM notifications WHERE team_id = %s ORDER BY created_at DESC LIMIT 50", (me.team_id,))
+        return views.notifications(conn, me.team_id, me.user_id)
+
+
+class MarkRead(BaseModel):
+    ids: list[str] | None = None
+
+
+@app.post("/api/notifications/read")
+def mark_notifications_read(body: MarkRead, me: Member = Depends(member)):
+    """Marks the given notifications read for this person, or all of them when no IDs are sent."""
+    with tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_reads (notification_id, user_id)
+            SELECT n.id, %s FROM notifications n WHERE n.team_id = %s AND (n.user_id IS NULL OR n.user_id = %s) AND (%s::text[] IS NULL OR n.id = ANY(%s::text[]))
+            ON CONFLICT DO NOTHING
+            """,
+            (me.user_id, me.team_id, me.user_id, body.ids, body.ids),
+        )
+    return {"ok": True}
+
+
+# Audit
+
+
+@app.get("/api/audit")
+def audit_log(actor: str | None = None, limit: int = Query(default=200, ge=1, le=500), me: Member = Depends(member)):
+    """The append-only audit record, newest first, with each entry linked to its record."""
+    if actor is not None and actor not in ("USER", "AGENT", "SYSTEM", "PROVIDER"):
+        raise HTTPException(400, "actor must be USER, AGENT, SYSTEM or PROVIDER")
+    with tx() as conn:
+        return views.audit_feed(conn, me.team_id, actor, limit)
 
 
 # Webhooks
@@ -647,11 +819,18 @@ def dev_start(body: DevRun, user_id: str = Depends(developer)):
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 WEB = ROOT / "web"
+APP = WEB / "dist"
+# Everything the app loads is bundled and served from here. React sets inline style attributes, which style-src allows.
+CSP = "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 
 @app.get("/")
 def index():
-    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+    """The React app, built from frontend/ into web/dist. Its asset names change with every build."""
+    built = APP / "index.html"
+    if not built.exists():
+        raise HTTPException(503, "The frontend isn't built. Run: cd frontend && npm ci && npm run build")
+    return FileResponse(built, headers={"Cache-Control": "no-cache", "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin"})
 
 
 @app.get("/health")
@@ -668,7 +847,17 @@ class Frontend(StaticFiles):
         return response
 
 
+class Assets(StaticFiles):
+    """Built assets have a content hash in their name, so they can be cached for good."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 # Last, so that every route above takes priority. web/ holds only public files.
+app.mount("/assets", Assets(directory=APP / "assets", check_dir=False), name="assets")
 app.mount("/", Frontend(directory=WEB), name="web")
 
 
