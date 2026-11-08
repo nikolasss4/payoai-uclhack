@@ -125,7 +125,7 @@ PROVIDER_MODE=simulator
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
-You can also leave this out and paste a key in the app. When there's no key, the chat says so and shows a field for one. A pasted key isn't stored anywhere: the API passes it to the agent worker, which keeps it in memory for that team and uses it ahead of `GEMINI_API_KEY`. After a restart, the chat asks for it again.
+You can also leave this out and paste a key in the app. When there's no key, the chat says so and shows a field for one. A pasted key isn't stored anywhere, and it works only from the browser that pasted it. Each browser sends a random secret with its requests, and the agent worker keeps the key in memory under a hash of that secret, ahead of `GEMINI_API_KEY`. Jobs started without a browser (the scheduler, webhooks) only use `GEMINI_API_KEY`. The key is forgotten on sign-out, after 12 hours, or when the worker restarts.
 
 **`.env.api`** (the API)
 

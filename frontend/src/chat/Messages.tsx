@@ -354,7 +354,6 @@ function ApprovalChatCard({ id }: { id: string }) {
 
 /** No Gemini key, or a rejected one: takes a key for the team's agent, then sends the message again. */
 function KeyErrorMsg({ m, onRetry }: { m: Extract<Item, { t: "error" }>; onRetry: (text: string, shown: string) => Promise<void> }) {
-  const { canWrite } = useApp();
   const [value, setValue] = useState("");
   const [saved, setSaved] = useState(false);
   const { busy, error, run } = useAction();
@@ -362,18 +361,17 @@ function KeyErrorMsg({ m, onRetry }: { m: Extract<Item, { t: "error" }>; onRetry
     e.preventDefault();
     if (!value.trim()) return;
     run(async () => {
-      await api("/api/team/gemini-key", { method: "PUT", body: { api_key: value.trim() } });
+      await api("/api/gemini-key", { method: "PUT", body: { api_key: value.trim() } });
       setValue("");
       setSaved(true);
       if (m.retry) await onRetry(m.retry, m.retry);
     });
   };
-  if (!canWrite) return <ErrorMsg message={`${m.message.split(". Paste")[0]}. Ask an Operator or Approver on your team to add a Gemini API key.`} />;
   return (
     <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 14, background: "var(--neutral-bg)", border: "1px solid var(--neutral-bd)", fontSize: 14, lineHeight: 1.45, maxWidth: 560, marginLeft: 38 }}>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
         <Icon name="key" size={20} style={{ color: "var(--muted)" }} />
-        <span>{saved ? "Key added. The assistant uses it until the app restarts." : m.message}</span>
+        <span>{saved ? "Key added for this browser. It's used until you sign out or the app restarts." : m.message}</span>
       </div>
       {!saved && (
         <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -382,7 +380,7 @@ function KeyErrorMsg({ m, onRetry }: { m: Extract<Item, { t: "error" }>; onRetry
             <button type="submit" className="btn-pill btn-primary" aria-disabled={busy || !value.trim()}>{busy ? "Adding…" : m.retry ? "Use key and retry" : "Use key"}</button>
           </div>
           <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
-            Get one from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>. It's kept in memory only, never saved, so you'll paste it again after the app restarts.
+            Get one from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>. It's used only from this browser and kept in the server's memory, never saved. Signing out forgets it.
           </span>
           <ErrorLine error={error} />
         </form>

@@ -1,6 +1,7 @@
 """The API. Every route checks team membership and role on the server. It holds no Gemini or provider key.
 
-A Gemini key pasted in the app is passed straight to the agent worker, which keeps it in memory. Nothing stores it."""
+A Gemini key pasted in the app is passed straight to the agent worker, which keeps it in memory for that browser only.
+Nothing stores it, and no route returns it."""
 
 import asyncio
 import csv
@@ -206,21 +207,36 @@ def get_avatar(kind: str, owner_id: str, v: str = "", s: str = ""):
 # Gemini key
 
 
+def key_ref(x_key_session: str = Header(default="")) -> str | None:
+    """The browser's own key secret, hashed. Jobs carry only this, never the secret or the key."""
+    return runtime_key.ref_for(x_key_session)
+
+
 class GeminiKey(BaseModel):
     api_key: str
 
 
-@app.put("/api/team/gemini-key")
-def set_gemini_key(body: GeminiKey, me: Member = Depends(member)):
-    """Hands a key to the agent worker for this team. It's held in the worker's memory, never stored."""
-    me.require("OPERATOR", "APPROVER")
+@app.put("/api/gemini-key")
+def set_gemini_key(body: GeminiKey, me: Member = Depends(member), ref: str | None = Depends(key_ref)):
+    """Hands a key to the agent worker for this browser only. It's held in memory, never stored."""
+    if ref is None:
+        raise HTTPException(400, "This browser has no key session. Reload the page and try again.")
     key = body.api_key.strip()
     if not key or len(key) > 200 or any(c.isspace() for c in key):
         raise HTTPException(422, "That doesn't look like an API key. Paste the whole key, with no spaces.")
     with tx() as conn:
-        runtime_key.send(conn, me.team_id, key)
+        runtime_key.send(conn, ref, key)
         audit(conn, me.team_id, "USER", me.user_id, "GeminiKeySet", "team", me.team_id)
     return {"saved": True}
+
+
+@app.delete("/api/gemini-key")
+def forget_gemini_key(ref: str | None = Depends(key_ref)):
+    """Called on sign-out. It needs no session, since it only forgets this browser's own key."""
+    if ref is not None:
+        with tx() as conn:
+            runtime_key.send(conn, ref, None)
+    return {"forgotten": True}
 
 
 # Chat
@@ -298,7 +314,7 @@ def _own_chat(conn, me: Member, chat_id: str) -> dict:
 
 
 @app.post("/api/chats/{chat_id}/turns")
-def send_turn(chat_id: str, body: NewTurn, me: Member = Depends(member)):
+def send_turn(chat_id: str, body: NewTurn, me: Member = Depends(member), ref: str | None = Depends(key_ref)):
     # One marker line per document, in the order they were attached. Readers split the user's own words off at the first one.
     document_ids = list(dict.fromkeys(([body.document_id] if body.document_id else []) + body.document_ids))
     if len(document_ids) > MAX_TURN_DOCUMENTS:
@@ -315,7 +331,7 @@ def send_turn(chat_id: str, body: NewTurn, me: Member = Depends(member)):
         conn.execute("INSERT INTO turns (id, chat_id, team_id, seq, user_input) VALUES (%s, %s, %s, %s, %s)", (turn_id, chat_id, me.team_id, seq, text))
         if chat["title"] is None:
             conn.execute("UPDATE chats SET title = %s WHERE id = %s", (body.text[:60], chat_id))
-        enqueue(conn, "run_turn", me.team_id, {"chat_id": chat_id, "turn_id": turn_id, "user_id": me.user_id})
+        enqueue(conn, "run_turn", me.team_id, {"chat_id": chat_id, "turn_id": turn_id, "user_id": me.user_id, "key_ref": ref})
     return {"id": turn_id}
 
 
@@ -367,7 +383,7 @@ def _events_after(chat_id: str, last: int) -> list[dict]:
 
 
 @app.post("/api/confirmations/{confirmation_id}/{decision}")
-def decide_confirmation(confirmation_id: str, decision: str, me: Member = Depends(member)):
+def decide_confirmation(confirmation_id: str, decision: str, me: Member = Depends(member), ref: str | None = Depends(key_ref)):
     if decision not in ("confirm", "decline"):
         raise HTTPException(404)
     with tx() as conn:
@@ -380,7 +396,7 @@ def decide_confirmation(confirmation_id: str, decision: str, me: Member = Depend
         if decision == "confirm":
             if me.role not in get_routine(row["routine"]).roles:
                 raise HTTPException(403, "Your role can't start this Routine.")
-            enqueue(conn, "run_routine", me.team_id, {"routine": row["routine"], "inputs": row["inputs"], "actor": me.user_id, "chat_id": row["chat_id"], "turn_id": row["turn_id"], "confirmation_id": confirmation_id}, dedupe_key=f"confirm:{confirmation_id}")
+            enqueue(conn, "run_routine", me.team_id, {"routine": row["routine"], "inputs": row["inputs"], "actor": me.user_id, "chat_id": row["chat_id"], "turn_id": row["turn_id"], "confirmation_id": confirmation_id, "key_ref": ref}, dedupe_key=f"confirm:{confirmation_id}")
     return {"status": row["status"]}
 
 
@@ -564,9 +580,9 @@ def chat_turns(chat_id: str, me: Member = Depends(member)):
 
 
 @app.post("/api/cash/analyse")
-def start_cash_analysis(me: Member = Depends(member)):
+def start_cash_analysis(me: Member = Depends(member), ref: str | None = Depends(key_ref)):
     with tx() as conn:
-        enqueue(conn, "cash_analysis", me.team_id, {})
+        enqueue(conn, "cash_analysis", me.team_id, {"key_ref": ref})
     return {"status": "QUEUED"}
 
 
@@ -889,10 +905,10 @@ def expense(expense_id: str, me: Member = Depends(member)):
 
 
 @app.post("/api/expenses/{expense_id}/evidence")
-def add_evidence(expense_id: str, body: dict, me: Member = Depends(member)):
+def add_evidence(expense_id: str, body: dict, me: Member = Depends(member), ref: str | None = Depends(key_ref)):
     me.require("OPERATOR", "APPROVER")
     with tx() as conn:
-        enqueue(conn, "attach_evidence", me.team_id, {"expense_id": expense_id, "document_id": body["document_id"], "user_id": me.user_id})
+        enqueue(conn, "attach_evidence", me.team_id, {"expense_id": expense_id, "document_id": body["document_id"], "user_id": me.user_id, "key_ref": ref})
     return {"status": "QUEUED"}
 
 

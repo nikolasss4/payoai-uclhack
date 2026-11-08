@@ -135,7 +135,7 @@ STILL_WORKS = "Your screens, approvals and payments still work."
 def failure_message(exc: llm.LLMFailure) -> tuple[str | None, str]:
     """A missing or rejected key is said plainly, so the chat can offer to take a new one."""
     if isinstance(exc, llm.MissingKey):
-        return "NO_KEY", f"No Gemini API key is configured, so the assistant can't answer. Paste a key below to turn it on. {STILL_WORKS}"
+        return "NO_KEY", f"No Gemini API key is configured for this browser, so the assistant can't answer. Paste a key below to turn it on. {STILL_WORKS}"
     if llm.key_rejected(str(exc)):
         return "BAD_KEY", f"Gemini rejected the configured API key, so the assistant can't answer. Paste a working key below. {STILL_WORKS}"
     return None, f"The assistant is unavailable right now. {STILL_WORKS}"
@@ -222,7 +222,7 @@ DRAFT_EVERY_SECONDS = 0.25
 def _call_gemini(session: Session, config, model_input, previous_id, s, attempts: int = 2) -> ModelTurn:
     """Streams one model call. Thought summaries and reply text are shown as they arrive."""
     last = None
-    gemini = llm.client(session.team_id)  # A missing key fails at once, without retrying.
+    gemini = llm.client()  # A missing key fails at once, without retrying.
     for _ in range(attempts):
         kwargs: dict[str, Any] = dict(
             model=config.model,

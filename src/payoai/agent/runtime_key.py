@@ -1,21 +1,38 @@
-"""A Gemini key pasted in the app, kept only in the agent worker's memory.
+"""A Gemini key pasted in the app, kept only in the agent worker's memory, for one browser.
 
-The API passes it on with Postgres NOTIFY, which isn't written to any table. The worker listens and
-keeps it per team until it restarts. Nothing stores it, so after a restart the chat asks for it again.
+Each browser makes a random secret and sends it with every request. The API passes the pasted key to
+the worker with Postgres NOTIFY, which isn't written to any table, filed under a hash of that secret.
+Jobs the browser starts carry only the hash, and the worker uses the matching key while it runs them.
+Another browser has a different secret, so it can't use the key. Nothing stores it: it's gone when the
+worker restarts, when the browser signs out, or after KEY_HOURS.
 """
 
+import contextvars
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 
 import psycopg
 
 from payoai.settings import schema
 
-_keys: dict[str, str] = {}
+KEY_HOURS = 12
+_keys: dict[str, tuple[str, float]] = {}
+_current: contextvars.ContextVar[str | None] = contextvars.ContextVar("gemini_key_ref", default=None)
+_SECRET = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+
+
+def ref_for(browser_secret: str | None) -> str | None:
+    """The hash a browser's key is filed under. A missing or malformed secret has none."""
+    if not browser_secret or not _SECRET.match(browser_secret):
+        return None
+    return hashlib.sha256(browser_secret.encode()).hexdigest()
 
 
 def channel() -> str:
@@ -23,17 +40,42 @@ def channel() -> str:
     return f"gemini_key_{schema()}"
 
 
-def get(team_id: str | None) -> str | None:
-    return _keys.get(team_id) if team_id else None
+@contextmanager
+def using(ref: str | None):
+    """Runs a job with the key of the browser that started it, if it pasted one."""
+    token = _current.set(ref)
+    try:
+        yield
+    finally:
+        _current.reset(token)
 
 
-def put(team_id: str, key: str) -> None:
-    _keys[team_id] = key
+def current_ref() -> str | None:
+    return _current.get()
 
 
-def send(conn, team_id: str, key: str) -> None:
-    """Delivered to the listening worker when `conn`'s transaction commits."""
-    conn.execute("SELECT pg_notify(%s, %s)", (channel(), json.dumps({"team_id": team_id, "api_key": key})))
+def get() -> str | None:
+    ref = _current.get()
+    entry = _keys.get(ref) if ref else None
+    if entry is None:
+        return None
+    key, expires = entry
+    if time.time() > expires:
+        _keys.pop(ref, None)
+        return None
+    return key
+
+
+def put(ref: str, key: str | None) -> None:
+    if key:
+        _keys[ref] = (key, time.time() + KEY_HOURS * 3600)
+    else:
+        _keys.pop(ref, None)
+
+
+def send(conn, ref: str, key: str | None) -> None:
+    """Delivered to the listening worker when `conn`'s transaction commits. A None key forgets it."""
+    conn.execute("SELECT pg_notify(%s, %s)", (channel(), json.dumps({"ref": ref, "api_key": key})))
 
 
 def _listen_forever() -> None:
@@ -44,7 +86,7 @@ def _listen_forever() -> None:
                 for note in conn.notifies():
                     try:
                         data = json.loads(note.payload)
-                        put(str(data["team_id"]), str(data["api_key"]))
+                        put(str(data["ref"]), data.get("api_key") or None)
                     except (ValueError, KeyError, TypeError):
                         continue
         except Exception:  # A lost connection is reported, then the listener reconnects.

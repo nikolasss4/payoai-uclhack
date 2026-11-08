@@ -20,7 +20,7 @@ class LLMFailure(Exception):
 
 
 class MissingKey(LLMFailure):
-    """No Gemini API key is configured for the team or the worker."""
+    """No Gemini API key was pasted in this browser, and the worker has none of its own."""
 
 
 # Phrases Gemini uses when it refuses the key itself, as opposed to any other failure.
@@ -44,13 +44,13 @@ def set_fake(fake) -> None:
     _fake = fake
 
 
-def api_key(team_id: str | None) -> str | None:
-    """A key pasted in the app for this team comes first (held in memory only), then GEMINI_API_KEY."""
-    return runtime_key.get(team_id) or os.environ.get("GEMINI_API_KEY") or None
+def api_key() -> str | None:
+    """The key the current job's browser pasted (held in memory only) comes first, then GEMINI_API_KEY."""
+    return runtime_key.get() or os.environ.get("GEMINI_API_KEY") or None
 
 
-def client(team_id: str | None = None):
-    key = api_key(team_id)
+def client():
+    key = api_key()
     if not key:
         raise MissingKey("no Gemini API key is configured")
     if key not in _clients:
@@ -96,7 +96,7 @@ def call(
         with step(ctx, "LLM_CALL", step_name, input={"parts": logged, "system": system}, trust_label=trust_label) as s:
             s.model, s.thinking_level = config.model, config.thinking_level
             try:
-                result = _invoke(step_name, config, parts, schema, system, s, ctx.team_id)
+                result = _invoke(step_name, config, parts, schema, system, s)
                 s.output = result.data if result.data is not None else result.text
                 return result
             except MissingKey as exc:
@@ -108,7 +108,7 @@ def call(
     raise LLMFailure(f"{step_name}: {last_error}")
 
 
-def _invoke(step_name, config, parts, schema, system, s, team_id=None) -> LLMResult:
+def _invoke(step_name, config, parts, schema, system, s) -> LLMResult:
     if _fake is not None:
         out = _fake(step_name, parts, schema)
         if isinstance(out, Exception):
@@ -126,7 +126,7 @@ def _invoke(step_name, config, parts, schema, system, s, team_id=None) -> LLMRes
         kwargs["system_instruction"] = system
     if schema:
         kwargs["response_format"] = {"type": "text", "mime_type": "application/json", "schema": schema}
-    gemini = client(team_id)
+    gemini = client()
     try:
         response = gemini.interactions.create(**kwargs)
     except Exception as exc:

@@ -18,7 +18,7 @@ def handle_turn(job: dict) -> None:
     payload = job["payload"]
     main_loop.run_turn(job["team_id"], payload["user_id"], payload["chat_id"], payload["turn_id"])
     with tx() as conn:
-        enqueue(conn, "learn_memory", job["team_id"], {"turn_id": payload["turn_id"], "user_id": payload["user_id"]}, dedupe_key=f"learn:{payload['turn_id']}")
+        enqueue(conn, "learn_memory", job["team_id"], {"turn_id": payload["turn_id"], "user_id": payload["user_id"], "key_ref": payload.get("key_ref")}, dedupe_key=f"learn:{payload['turn_id']}")
 
 
 def handle_routine(job: dict) -> None:
@@ -55,6 +55,14 @@ def handle_eval(job: dict) -> None:
     run_saved(job["payload"]["eval_run_id"])
 
 
+def with_browser_key(handler):
+    """A job a browser started runs with the key that browser pasted. Others use GEMINI_API_KEY only."""
+    def run(job: dict) -> None:
+        with runtime_key.using((job.get("payload") or {}).get("key_ref")):
+            handler(job)
+    return run
+
+
 HANDLERS = {
     "run_turn": handle_turn,
     "run_routine": handle_routine,
@@ -65,6 +73,7 @@ HANDLERS = {
     "learn_memory": handle_learn,
     "run_eval": handle_eval,
 }
+HANDLERS = {kind: with_browser_key(handler) for kind, handler in HANDLERS.items()}
 
 if __name__ == "__main__":
     runtime_key.start_listener()

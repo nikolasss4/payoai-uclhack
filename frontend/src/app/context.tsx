@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, onSignedOut, prefs, refreshProfile, setSession, storage, type Session } from "../api";
+import { api, forgetGeminiKey, onSignedOut, prefs, refreshProfile, setSession, storage, type Session } from "../api";
 import { refreshAll, useLive, useMedia } from "../hooks";
 
 export type Section = "chat" | "approvals" | "payments" | "cash" | "expenses" | "audit";
@@ -108,6 +108,7 @@ export function AppProvider({ session, onSession, children }: { session: Session
   }, []);
 
   const signOut = useCallback(() => {
+    forgetGeminiKey();
     setSession(null);
     onSession(null);
     history.replaceState(null, "", "#/");
