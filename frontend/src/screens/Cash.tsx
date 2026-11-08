@@ -5,7 +5,7 @@ import { useLive } from "../hooks";
 import { day, dayLabel, hm, when } from "../lib";
 import { Badge, ErrorLine, Icon, PageTitle, Skeleton, Stat } from "../ui";
 import { AccountsPanel } from "./Accounts";
-import { accountLook, freshness, type Balance } from "./Dashboard";
+import { AccountMark, accountLook, freshness, type Balance } from "./Dashboard";
 
 interface Daily { date: string; position: string; ratio: number; short: boolean; bills: string[] }
 export interface AssetResult {
@@ -139,7 +139,7 @@ function AccountCard({ a, mobile }: { a: Balance; mobile: boolean }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: mobile ? 16 : 20, padding: mobile ? 18 : 24, borderRadius: mobile ? 24 : 28, background: "var(--surface)", border: "1px solid var(--border)", boxShadow: mobile ? undefined : "var(--shadow-1)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: mobile ? 10 : 12, flexWrap: "wrap" }}>
-        <span style={{ width: mobile ? 40 : 44, height: mobile ? 40 : 44, flex: "none", borderRadius: mobile ? 13 : 14, background: look.bg, color: look.fg, display: "grid", placeItems: "center" }}><Icon name={look.icon} size={mobile ? 20 : 22} /></span>
+        <span style={{ width: mobile ? 40 : 44, height: mobile ? 40 : 44, flex: "none", borderRadius: mobile ? 13 : 14, background: look.bg, color: look.fg, display: "grid", placeItems: "center" }}><AccountMark a={a} size={mobile ? 22 : 26} /></span>
         <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
           <span style={{ fontSize: mobile ? 15 : 16, fontWeight: 600 }}>{a.name}</span>
           <span style={{ fontSize: mobile ? 12 : 12.5, color: "var(--muted)" }}>{mobile ? asOf : `${a.asset} · ${asOf}`}</span>
