@@ -98,7 +98,7 @@ def research_loop(prompt: str, finish: dict, ctx: TraceContext, step_name: str, 
             kwargs = dict(model=config.model, input=model_input, tools=tools, generation_config={"thinking_level": config.thinking_level}, timeout=config.timeout_seconds)
             if previous:
                 kwargs["previous_interaction_id"] = previous
-            gemini = llm.client(ctx.team_id)
+            gemini = llm.client()
             try:
                 response = gemini.interactions.create(**kwargs)
             except Exception as exc:

@@ -101,20 +101,42 @@ def test_pause_blocks_approval_through_the_api(biz, prepared):
     assert result["won"] is False and "paused" in result["message"]
 
 
-def test_a_pasted_gemini_key_goes_to_the_worker_and_is_never_stored(biz, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
-    assert client.put("/api/team/gemini-key", headers=headers(biz, "VIEWER"), json={"api_key": "AIza-viewer"}).status_code == 403
-    assert client.put("/api/team/gemini-key", headers=headers(biz, "OPERATOR"), json={"api_key": "has spaces"}).status_code == 422
+BROWSER_A, BROWSER_B = "a" * 64, "b" * 64
+
+
+def test_a_pasted_gemini_key_works_only_for_the_browser_that_pasted_it(biz, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    h = headers(biz, "OPERATOR")
+    assert client.put("/api/gemini-key", headers=h, json={"api_key": "AIza-x"}).status_code == 400  # no browser secret
+    assert client.put("/api/gemini-key", headers={**h, "X-Key-Session": BROWSER_A}, json={"api_key": "has spaces"}).status_code == 422
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as listener:
         listener.execute(f'LISTEN "{runtime_key.channel()}"')
-        response = client.put("/api/team/gemini-key", headers=headers(biz, "OPERATOR"), json={"api_key": " AIza-pasted "})
+        response = client.put("/api/gemini-key", headers={**h, "X-Key-Session": BROWSER_A}, json={"api_key": " AIza-pasted "})
         assert response.status_code == 200 and "AIza" not in response.text
-        note = next(listener.notifies(timeout=5))
-    assert json.loads(note.payload) == {"team_id": biz["team"]["id"], "api_key": "AIza-pasted"}
-    # The worker would keep it in memory; until then the team uses the worker's own key.
-    assert llm.api_key(biz["team"]["id"]) == "from-env"
-    runtime_key.put(biz["team"]["id"], "AIza-pasted")
-    assert llm.api_key(biz["team"]["id"]) == "AIza-pasted" and llm.api_key("team_none") == "from-env"
+        note = json.loads(next(listener.notifies(timeout=5)).payload)
+    ref_a = runtime_key.ref_for(BROWSER_A)
+    # Only a hash of the browser's secret travels with the key, never the secret.
+    assert note == {"ref": ref_a, "api_key": "AIza-pasted"} and BROWSER_A not in json.dumps(note)
+    runtime_key.put(note["ref"], note["api_key"])  # What the worker's listener does.
+
+    with runtime_key.using(ref_a):
+        assert llm.api_key() == "AIza-pasted"
+    with runtime_key.using(runtime_key.ref_for(BROWSER_B)):
+        assert llm.api_key() is None
+    assert llm.api_key() is None
+
+    # A turn from browser A carries only its hash, so the worker runs it with A's key.
+    chat = client.post("/api/chats", headers=h).json()["id"]
+    client.post(f"/api/chats/{chat}/turns", headers={**h, "X-Key-Session": BROWSER_A}, json={"text": "hi"})
+    with tx() as conn:
+        payload = fetch_one(conn, "SELECT payload FROM jobs WHERE kind = 'run_turn' AND payload->>'chat_id' = %s", (chat,))["payload"]
+    assert payload["key_ref"] == ref_a and "AIza" not in json.dumps(payload)
+
+    # Signing out forgets it.
+    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as listener:
+        listener.execute(f'LISTEN "{runtime_key.channel()}"')
+        assert client.delete("/api/gemini-key", headers={"X-Key-Session": BROWSER_A}).status_code == 200
+        assert json.loads(next(listener.notifies(timeout=5)).payload) == {"ref": ref_a, "api_key": None}
 
 
 def test_someone_elses_chat_is_not_found(biz):

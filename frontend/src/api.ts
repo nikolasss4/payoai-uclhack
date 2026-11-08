@@ -54,8 +54,31 @@ export function onSignedOut(fn: () => void) {
   onUnauthorised = fn;
 }
 
+/* This browser's own random secret. A Gemini key pasted here is filed under it in the agent's memory,
+   so only requests carrying it can use that key. It's never the key itself, and it's sent with every request. */
+const KEY_SESSION = "payo.key-session.v1";
+let keySecret: string | null = null;
+function keySession(): string {
+  if (keySecret) return keySecret;
+  try { keySecret = localStorage.getItem(KEY_SESSION); } catch { keySecret = null; }
+  if (!keySecret) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    keySecret = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    try { localStorage.setItem(KEY_SESSION, keySecret); } catch { /* Without storage it lasts until reload. */ }
+  }
+  return keySecret;
+}
+
+/** On sign-out the agent forgets this browser's key, and the browser starts a new secret. */
+export function forgetGeminiKey() {
+  const secret = keySecret || (() => { try { return localStorage.getItem(KEY_SESSION); } catch { return null; } })();
+  if (secret) fetch("/api/gemini-key", { method: "DELETE", headers: { "X-Key-Session": secret }, keepalive: true }).catch(() => {});
+  keySecret = null;
+  try { localStorage.removeItem(KEY_SESSION); } catch { /* Nothing to remove. */ }
+}
+
 export function authHeaders(): Record<string, string> {
-  return current ? { Authorization: `Bearer ${current.token}`, "X-Team-Id": current.team.id } : {};
+  return current ? { Authorization: `Bearer ${current.token}`, "X-Team-Id": current.team.id, "X-Key-Session": keySession() } : {};
 }
 
 interface Opts { method?: string; body?: unknown; form?: FormData; signal?: AbortSignal; auth?: boolean }

@@ -6,7 +6,7 @@ Built for the UCL AgentVerse 2026 Finance track.
 
 **Live demo: [payoai.ecomnis.com](https://payoai.ecomnis.com)**
 
-> For safety, the demo has no Google Gemini API key, so the agent doesn't run there. You can click through the app and its seeded data, but chat requests and bill reading won't work. To try the agent, run it yourself with your own key. See [Run it yourself](#run-it-yourself).
+> For safety, the demo server has no Google Gemini API key of its own. When you chat, the agent says no key is configured and offers a field to paste yours (get one from [Google AI Studio](https://aistudio.google.com/apikey)). The key works only from your browser and isn't saved anywhere on the server: no file, database or log. The agent holds it in memory just to run your requests, and forgets it when you sign out, after 12 hours, or when the server restarts. You can also [run it yourself](#run-it-yourself) with your own key.
 
 PayoAI runs on synthetic data and a simulated payment provider. **It has never moved real money, and it uses no real records, real account details or real logins.**
 
@@ -125,7 +125,7 @@ PROVIDER_MODE=simulator
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
-You can also leave this out and paste a key in the app. When there's no key, the chat says so and shows a field for one. A pasted key isn't stored anywhere: the API passes it to the agent worker, which keeps it in memory for that team and uses it ahead of `GEMINI_API_KEY`. After a restart, the chat asks for it again.
+You can also leave this out and paste a key in the app. When there's no key, the chat says so and shows a field for one. A pasted key isn't stored anywhere, and it works only from the browser that pasted it. Each browser sends a random secret with its requests, and the agent worker keeps the key in memory under a hash of that secret, ahead of `GEMINI_API_KEY`. Jobs started without a browser (the scheduler, webhooks) only use `GEMINI_API_KEY`. The key is forgotten on sign-out, after 12 hours, or when the worker restarts.
 
 **`.env.api`** (the API)
 
