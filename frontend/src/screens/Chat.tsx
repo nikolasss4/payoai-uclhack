@@ -150,8 +150,15 @@ export function ChatScreen() {
         {(chats.data || []).map((c) => (
           <button key={c.id} type="button" className="hoverable" onClick={() => setActive(c.id)}
             style={{ display: "flex", flexDirection: "column", gap: 2, padding: "9px 10px", borderRadius: 12, cursor: "pointer", background: c.id === active ? "var(--raised)" : "transparent", border: 0, textAlign: "left" }}>
-            <span style={{ fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", width: "100%" }}>{c.title || "Untitled chat"}</span>
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>{dayLabel(c.last_at)}</span>
+            <span style={{ display: "flex", alignItems: "baseline", gap: 8, width: "100%" }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Untitled chat"}</span>
+              <span style={{ flex: "none", fontSize: 11.5, color: "var(--muted)" }}>{dayLabel(c.last_at)}</span>
+            </span>
+            {c.last_message && (
+              <span style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", width: "100%" }}>
+                {c.last_from === "user" ? "You: " : ""}{c.last_message}
+              </span>
+            )}
           </button>
         ))}
       </aside>
@@ -241,7 +248,10 @@ function MobileChatBar({ title, chats, active, onPick, onNew, onMemory }: { titl
           {chats.map((c) => (
             <button key={c.id} type="button" onClick={() => { onPick(c.id); setOpen(false); }}
               style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", minHeight: 44, padding: "4px 10px", borderRadius: 10, cursor: "pointer", background: c.id === active ? "var(--raised)" : "transparent", border: 0, width: "100%", textAlign: "left" }}>
-              <span style={{ fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Untitled chat"}</span>
+              <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <span style={{ fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Untitled chat"}</span>
+                {c.last_message && <span style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.last_from === "user" ? "You: " : ""}{c.last_message}</span>}
+              </span>
               <span style={{ fontSize: 12, color: "var(--muted)", flex: "none" }}>{dayLabel(c.last_at)}</span>
             </button>
           ))}

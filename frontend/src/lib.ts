@@ -56,7 +56,8 @@ export const firstName = (name?: string | null) => (name || "").split(" ")[0];
 
 function parse(value?: string | null): Date | null {
   if (!value) return null;
-  const d = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date(value);
+  // Postgres timestamps carry microseconds, which some browsers won't parse, so they're cut to milliseconds.
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date(value.replace(/(\.\d{3})\d+/, "$1").replace(" ", "T"));
   return Number.isNaN(d.getTime()) ? null : d;
 }
 const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
